@@ -10,7 +10,7 @@ from rq_scheduler import Scheduler
 
 from config import TASK_TIMEOUT
 from exceptions.task_exceptions import SchedulerException
-from handler.redis_handler import get_job_func_name, low_prio_queue
+from handler.redis_handler import QueuePrio, get_job_func_name, low_prio_queue
 from logger.logger import log
 from utils.context import ctx_httpx_client
 
@@ -19,6 +19,19 @@ tasks_scheduler = Scheduler(queue=low_prio_queue, connection=low_prio_queue.conn
 # Lives here rather than in the task module so scan job discovery can recognise
 # the scheduled rescan without importing it, which would close an import cycle.
 SCAN_LIBRARY_TASK_FUNC: Final = "tasks.scheduled.scan_library.scan_library_task.run"
+
+# Held by every job that runs a scan, whoever started it: the socket handler,
+# the filesystem watcher, or the scheduled rescan.
+SCAN_JOB_GROUP: Final = "scan"
+
+# Job meta keys. `task_name` and `task_type` feed the task status endpoint; the
+# next two drive duplicate checks and cancellation in `tasks.queue`.
+# `cron_string` is rq-scheduler's own, stamped on standing periodic entries.
+META_TASK_NAME: Final = "task_name"
+META_TASK_TYPE: Final = "task_type"
+META_JOB_GROUP: Final = "job_group"
+META_STOP_FLAG: Final = "stop_flag"
+META_CRON_STRING: Final = "cron_string"
 
 
 def update_job_meta(metadata: dict[str, Any]) -> None:
@@ -45,6 +58,26 @@ class TaskType(str, Enum):
     GENERIC = "generic"
 
 
+def build_job_meta(
+    *,
+    task_name: str,
+    task_type: TaskType,
+    job_group: str | None = None,
+    stop_flag: str | None = None,
+) -> dict[str, Any]:
+    """The meta every enqueue attaches, so job discovery reads one shape."""
+    meta: dict[str, Any] = {
+        META_TASK_NAME: task_name,
+        META_TASK_TYPE: task_type.value,
+    }
+    if job_group:
+        meta[META_JOB_GROUP] = job_group
+    if stop_flag:
+        meta[META_STOP_FLAG] = stop_flag
+
+    return meta
+
+
 class Task(ABC):
     """Base class for all RQ tasks."""
 
@@ -55,6 +88,9 @@ class Task(ABC):
     cron_string: str | None = None
     task_type: TaskType
     timeout: int
+    queue_prio: QueuePrio
+    job_group: str | None = None
+    stop_flag: str | None = None
 
     def __init__(
         self,
@@ -65,6 +101,9 @@ class Task(ABC):
         manual_run: bool = False,
         cron_string: str | None = None,
         timeout: int = TASK_TIMEOUT,
+        queue_prio: QueuePrio = QueuePrio.LOW,
+        job_group: str | None = None,
+        stop_flag: str | None = None,
     ):
         self.title = title
         self.description = description or title
@@ -73,6 +112,14 @@ class Task(ABC):
         self.manual_run = manual_run
         self.cron_string = cron_string
         self.timeout = timeout
+        self.queue_prio = queue_prio
+        # Names the kind of work, so cancelling and duplicate checks can find
+        # every job doing it whoever started it. Enqueues default to one run of a
+        # group at a time; `tasks.queue.enqueue_func` can opt out per call. Tasks
+        # leaving this None can be queued any number of times over.
+        self.job_group = job_group
+        # A redis key the task polls so it can unwind itself when asked to stop.
+        self.stop_flag = stop_flag
 
     @property
     def can_run_manually(self) -> bool:
@@ -131,10 +178,12 @@ class PeriodicTask(Task, ABC):
                 func=self.func,
                 repeat=None,
                 timeout=self.timeout,
-                meta={
-                    "task_name": self.title,
-                    "task_type": self.task_type.value,
-                },
+                meta=build_job_meta(
+                    task_name=self.title,
+                    task_type=self.task_type,
+                    job_group=self.job_group,
+                    stop_flag=self.stop_flag,
+                ),
             )
 
         return None

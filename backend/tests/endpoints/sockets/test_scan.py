@@ -3,10 +3,12 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 import socketio
+from fakeredis import FakeRedis
 from rq.job import Job, JobStatus
 
 from endpoints.sockets import scan as scan_module
 from endpoints.sockets.scan import (
+    STOP_SCAN_FLAG,
     ScanStats,
     _identify_rom,
     reject_unauthorized_scan,
@@ -25,10 +27,18 @@ from handler.filesystem.roms_handler import (
     ParsedTags,
 )
 from handler.metadata.base_handler import UniversalPlatformSlug as UPS
+from handler.redis_handler import QueuePrio
 from handler.scan_handler import MetadataSource, ScanType
 from models.firmware import Firmware
 from models.platform import Platform
 from models.rom import Rom
+from tasks import queue as queue_module
+from tasks.tasks import (
+    META_CRON_STRING,
+    META_JOB_GROUP,
+    META_STOP_FLAG,
+    SCAN_JOB_GROUP,
+)
 
 
 def test_scan_stats():
@@ -513,7 +523,7 @@ class TestScanAuthorization:
         mocker.patch.object(
             scan_module, "get_authenticated_user", AsyncMock(return_value=None)
         )
-        enqueue = mocker.patch.object(scan_module.high_prio_queue, "enqueue")
+        enqueue = mocker.patch.object(scan_module, "enqueue_func")
         scan_platforms_mock = mocker.patch.object(
             scan_module, "scan_platforms", AsyncMock()
         )
@@ -529,11 +539,11 @@ class TestScanAuthorization:
         mocker.patch.object(
             scan_module, "get_authenticated_user", AsyncMock(return_value=None)
         )
-        get_jobs = mocker.patch.object(scan_module.high_prio_queue, "get_jobs")
+        pending = mocker.patch.object(scan_module, "pending_jobs_for")
 
         await stop_scan_handler("sid")
 
-        get_jobs.assert_not_called()
+        pending.assert_not_called()
 
 
 class TestIdentifyRomReassociation:
@@ -1028,37 +1038,75 @@ class TestGetPico8CoverUrl:
         assert fs_name in url
 
 
-SCAN_PLATFORMS_FUNC = "endpoints.sockets.scan.scan_platforms"
-CLEANUP_FUNC = "tasks.scheduled.cleanup_zip_cache.cleanup_zip_cache_task.run"
-
 _job_ids = count()
 
 
-def make_job(func_name: str, *, status=JobStatus.QUEUED):
-    """An RQ job stub that scan job discovery will accept."""
+def make_job(
+    *,
+    job_group: str | None = SCAN_JOB_GROUP,
+    status=JobStatus.QUEUED,
+    cron_string: str | None = None,
+    platform_ids: list[int] | None = None,
+):
+    """An RQ job stub carrying the meta job discovery reads."""
     job = MagicMock(spec=Job)
     job.id = f"job-{next(_job_ids)}"
-    job.func_name = func_name
     job.get_status.return_value = status
+    job.kwargs = {"platform_ids": platform_ids or []}
+
+    meta: dict[str, object] = {}
+    if job_group:
+        meta[META_JOB_GROUP] = job_group
+        meta[META_STOP_FLAG] = STOP_SCAN_FLAG
+    if cron_string:
+        meta[META_CRON_STRING] = cron_string
+    job.get_meta.return_value = meta
+
     return job
+
+
+def make_running_job(**kwargs):
+    """A job stub as a worker would report it."""
+    kwargs.setdefault("status", JobStatus.STARTED)
+    return make_job(**kwargs)
 
 
 def patch_scan_jobs(
     mocker, *, running=None, high_queued=(), low_queued=(), scheduled=()
 ):
-    """Point every place scan discovery looks at a fixed set of jobs."""
+    """Point every place job discovery looks at a fixed set of jobs."""
     worker = MagicMock()
     worker.get_current_job.return_value = running
-    mocker.patch.object(scan_module.Worker, "all", return_value=[worker])
+    mocker.patch.object(queue_module.Worker, "all", return_value=[worker])
+
+    for prio, jobs in (
+        (QueuePrio.HIGH, high_queued),
+        (QueuePrio.DEFAULT, ()),
+        (QueuePrio.LOW, low_queued),
+    ):
+        mocker.patch.object(
+            queue_module.QUEUES[prio], "get_jobs", return_value=list(jobs)
+        )
+
     mocker.patch.object(
-        scan_module.high_prio_queue, "get_jobs", return_value=list(high_queued)
+        queue_module.tasks_scheduler, "get_jobs", return_value=list(scheduled)
     )
-    mocker.patch.object(
-        scan_module.low_prio_queue, "get_jobs", return_value=list(low_queued)
-    )
-    mocker.patch.object(
-        scan_module.tasks_scheduler, "get_jobs", return_value=list(scheduled)
-    )
+
+
+@pytest.fixture
+def enqueue(mocker):
+    """The enqueue the socket handler ends up calling, duplicate checks intact."""
+    return mocker.patch.object(queue_module.QUEUES[QueuePrio.HIGH], "enqueue")
+
+
+@pytest.fixture
+def isolated_debounce(mocker):
+    """Give each test its own debounce state.
+
+    The window outlives a test, so sharing one redis would let the first test to
+    enqueue a scan reject every later one.
+    """
+    return mocker.patch.object(queue_module, "redis_client", FakeRedis())
 
 
 class TestScanConcurrency:
@@ -1079,17 +1127,17 @@ class TestScanConcurrency:
         )
         mocker.patch.object(scan_module, "DEV_MODE", False)
 
-    async def test_enqueues_when_nothing_running(self, mocker, emit):
+    async def test_enqueues_when_nothing_running(
+        self, mocker, emit, enqueue, isolated_debounce
+    ):
         patch_scan_jobs(mocker)
-        enqueue = mocker.patch.object(scan_module.high_prio_queue, "enqueue")
 
         await scan_handler("sid", {"type": "quick"})
 
         enqueue.assert_called_once()
 
-    async def test_refuses_when_a_scan_is_running(self, mocker, emit):
-        patch_scan_jobs(mocker, running=make_job(SCAN_PLATFORMS_FUNC))
-        enqueue = mocker.patch.object(scan_module.high_prio_queue, "enqueue")
+    async def test_refuses_when_a_scan_is_running(self, mocker, emit, enqueue):
+        patch_scan_jobs(mocker, running=make_running_job())
 
         await scan_handler("sid", {"type": "quick"})
 
@@ -1097,70 +1145,68 @@ class TestScanConcurrency:
         emit.assert_awaited_once()
         assert emit.await_args.args[0] == "scan:done_ko"
 
-    async def test_refuses_when_a_scan_is_queued(self, mocker, emit):
-        patch_scan_jobs(mocker, high_queued=[make_job(SCAN_PLATFORMS_FUNC)])
-        enqueue = mocker.patch.object(scan_module.high_prio_queue, "enqueue")
+    async def test_refuses_when_a_scan_is_queued(self, mocker, emit, enqueue):
+        patch_scan_jobs(mocker, high_queued=[make_job()])
 
         await scan_handler("sid", {"type": "quick"})
 
         enqueue.assert_not_called()
 
-    async def test_refuses_when_a_watcher_scan_is_queued(self, mocker, emit):
+    async def test_refuses_when_a_watcher_scan_is_queued(self, mocker, emit, enqueue):
         # Watcher scans land in the low priority queue, not the high one.
-        patch_scan_jobs(mocker, low_queued=[make_job(SCAN_PLATFORMS_FUNC)])
-        enqueue = mocker.patch.object(scan_module.high_prio_queue, "enqueue")
+        patch_scan_jobs(mocker, low_queued=[make_job()])
 
         await scan_handler("sid", {"type": "quick"})
 
         enqueue.assert_not_called()
 
-    async def test_refuses_when_a_watcher_scan_is_scheduled(self, mocker, emit):
+    async def test_refuses_when_a_watcher_scan_is_scheduled(
+        self, mocker, emit, enqueue
+    ):
         # A watcher scan waits out its delay in the scheduler before it queues.
-        patch_scan_jobs(
-            mocker,
-            scheduled=[make_job(SCAN_PLATFORMS_FUNC, status=JobStatus.SCHEDULED)],
-        )
-        enqueue = mocker.patch.object(scan_module.high_prio_queue, "enqueue")
+        patch_scan_jobs(mocker, scheduled=[make_job(status=JobStatus.SCHEDULED)])
 
         await scan_handler("sid", {"type": "quick"})
 
         enqueue.assert_not_called()
 
-    async def test_refuses_when_the_scheduled_rescan_is_running(self, mocker, emit):
+    async def test_refuses_when_the_scheduled_rescan_is_running(
+        self, mocker, emit, enqueue
+    ):
         # The scheduled rescan runs scan_platforms from inside its own task, so
-        # the worker reports the task's name rather than the scan's.
-        patch_scan_jobs(mocker, running=make_job(scan_module.SCAN_LIBRARY_TASK_FUNC))
-        enqueue = mocker.patch.object(scan_module.high_prio_queue, "enqueue")
+        # the job on the worker is the task's, not the scan's. It holds the same
+        # job group, which is what makes it recognisable.
+        patch_scan_jobs(mocker, running=make_running_job(cron_string="0 3 * * *"))
 
         await scan_handler("sid", {"type": "quick"})
 
         enqueue.assert_not_called()
 
-    async def test_standing_rescan_cron_entry_does_not_block(self, mocker, emit):
+    async def test_standing_rescan_cron_entry_does_not_block(
+        self, mocker, emit, enqueue, isolated_debounce
+    ):
         # The cron entry sits in the scheduler for as long as the periodic task
         # is enabled. It is a schedule, not a scan waiting to run.
         patch_scan_jobs(
             mocker,
-            scheduled=[
-                make_job(scan_module.SCAN_LIBRARY_TASK_FUNC, status=JobStatus.SCHEDULED)
-            ],
+            scheduled=[make_job(status=JobStatus.SCHEDULED, cron_string="0 3 * * *")],
         )
-        enqueue = mocker.patch.object(scan_module.high_prio_queue, "enqueue")
 
         await scan_handler("sid", {"type": "quick"})
 
         enqueue.assert_called_once()
 
-    async def test_ignores_unrelated_jobs(self, mocker, emit):
+    async def test_ignores_unrelated_jobs(
+        self, mocker, emit, enqueue, isolated_debounce
+    ):
         # Only scans block scans; a cleanup or metadata task must not.
         patch_scan_jobs(
             mocker,
-            running=make_job(CLEANUP_FUNC),
-            high_queued=[make_job(CLEANUP_FUNC)],
-            low_queued=[make_job(CLEANUP_FUNC)],
-            scheduled=[make_job(CLEANUP_FUNC, status=JobStatus.SCHEDULED)],
+            running=make_running_job(job_group="cleanup_zip_cache"),
+            high_queued=[make_job(job_group=None)],
+            low_queued=[make_job(job_group="cleanup_zip_cache")],
+            scheduled=[make_job(job_group=None, status=JobStatus.SCHEDULED)],
         )
-        enqueue = mocker.patch.object(scan_module.high_prio_queue, "enqueue")
 
         await scan_handler("sid", {"type": "quick"})
 
@@ -1198,7 +1244,7 @@ class TestStopFlagOwnership:
         redis.delete.assert_called_once_with(scan_module.STOP_SCAN_FLAG)
 
     async def test_clears_the_flag_set_against_itself(self, mocker, redis):
-        own_job = make_job(SCAN_PLATFORMS_FUNC)
+        own_job = make_running_job()
         patch_scan_jobs(mocker, running=own_job)
         mocker.patch.object(scan_module, "get_current_job", return_value=own_job)
 
@@ -1209,9 +1255,9 @@ class TestStopFlagOwnership:
     async def test_leaves_another_running_scans_flag_alone(self, mocker, redis):
         # The other scan may not have polled the flag yet, and dropping it here
         # would let a scan the user stopped carry on to completion.
-        patch_scan_jobs(mocker, running=make_job(SCAN_PLATFORMS_FUNC))
+        patch_scan_jobs(mocker, running=make_running_job())
         mocker.patch.object(
-            scan_module, "get_current_job", return_value=make_job(SCAN_PLATFORMS_FUNC)
+            scan_module, "get_current_job", return_value=make_running_job()
         )
 
         await scan_platforms(platform_ids=[], metadata_sources=[])
@@ -1238,34 +1284,61 @@ class TestStopScan:
 
     @pytest.fixture
     def redis(self, mocker):
-        return mocker.patch.object(scan_module, "redis_client")
+        """Cancellation sets the stop flag from the queue module."""
+        return mocker.patch.object(queue_module, "redis_client")
+
+    @pytest.fixture(autouse=True)
+    def scheduler_cancel(self, mocker):
+        return mocker.patch.object(queue_module.tasks_scheduler, "cancel")
 
     async def test_sets_stop_flag_for_running_scan(self, mocker, emit, redis):
-        running = make_job(SCAN_PLATFORMS_FUNC)
+        running = make_running_job()
         patch_scan_jobs(mocker, running=running)
 
         await stop_scan_handler("sid")
 
-        running.cancel.assert_called_once()
         redis.set.assert_called_once_with(scan_module.STOP_SCAN_FLAG, 1)
+
+    async def test_leaves_a_running_scans_status_to_the_worker(
+        self, mocker, emit, redis
+    ):
+        # RQ records success without checking whether a job was cancelled, so
+        # marking it here just gets overwritten: the scan would report itself
+        # cancelled and then finished as it unwound.
+        running = make_running_job()
+        patch_scan_jobs(mocker, running=running)
+
+        await stop_scan_handler("sid")
+
+        running.cancel.assert_not_called()
 
     async def test_sets_stop_flag_for_running_scheduled_rescan(
         self, mocker, emit, redis
     ):
         # The flag is the only channel an in-flight scan polls, so missing the
         # scheduled rescan here makes stopping it a silent no-op.
-        running = make_job(scan_module.SCAN_LIBRARY_TASK_FUNC)
-        patch_scan_jobs(mocker, running=running)
+        patch_scan_jobs(mocker, running=make_running_job(cron_string="0 3 * * *"))
 
         await stop_scan_handler("sid")
 
         redis.set.assert_called_once_with(scan_module.STOP_SCAN_FLAG, 1)
 
+    async def test_leaves_the_rescan_schedule_intact(
+        self, mocker, emit, redis, scheduler_cancel
+    ):
+        # rq-scheduler reuses one job for every run of a periodic task, so
+        # cancelling that job outright would stop the rescan ever running again.
+        running = make_running_job(cron_string="0 3 * * *")
+        patch_scan_jobs(mocker, running=running)
+
+        await stop_scan_handler("sid")
+
+        running.cancel.assert_not_called()
+        scheduler_cancel.assert_not_called()
+
     async def test_cancels_queued_scans(self, mocker, emit, redis):
-        queued = [make_job(SCAN_PLATFORMS_FUNC), make_job(SCAN_PLATFORMS_FUNC)]
-        patch_scan_jobs(
-            mocker, running=make_job(SCAN_PLATFORMS_FUNC), high_queued=queued
-        )
+        queued = [make_job(), make_job()]
+        patch_scan_jobs(mocker, running=make_running_job(), high_queued=queued)
 
         await stop_scan_handler("sid")
 
@@ -1275,8 +1348,8 @@ class TestStopScan:
     async def test_cancels_watcher_scans(self, mocker, emit, redis):
         # Cancelling only the high priority queue would hand the worker the
         # watcher's scan the moment the running one unwinds.
-        low_queued = make_job(SCAN_PLATFORMS_FUNC)
-        scheduled = make_job(SCAN_PLATFORMS_FUNC, status=JobStatus.SCHEDULED)
+        low_queued = make_job()
+        scheduled = make_job(status=JobStatus.SCHEDULED)
         patch_scan_jobs(mocker, low_queued=[low_queued], scheduled=[scheduled])
 
         await stop_scan_handler("sid")
@@ -1287,7 +1360,7 @@ class TestStopScan:
     async def test_cancels_queued_scans_with_none_running(self, mocker, emit, redis):
         # Stopping a scan that has not been picked up yet must still drop it,
         # and must not leave a stop flag behind for the next scan to trip on.
-        queued = [make_job(SCAN_PLATFORMS_FUNC)]
+        queued = [make_job()]
         patch_scan_jobs(mocker, high_queued=queued)
 
         await stop_scan_handler("sid")

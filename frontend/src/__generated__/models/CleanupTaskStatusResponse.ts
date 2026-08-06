@@ -10,6 +10,7 @@ export type CleanupTaskStatusResponse = {
     status: JobStatus;
     created_at: (string | null);
     enqueued_at: (string | null);
+    queue_position: (number | null);
     started_at: (string | null);
     ended_at: (string | null);
     task_type: string;

@@ -10,7 +10,6 @@ from rq.registry import FailedJobRegistry, FinishedJobRegistry
 from config import (
     ENABLE_RESCAN_ON_FILESYSTEM_CHANGE,
     RESCAN_ON_FILESYSTEM_CHANGE_DELAY,
-    TASK_RESULT_TTL,
 )
 from decorators.auth import protected_route
 from endpoints.responses import (
@@ -19,12 +18,14 @@ from endpoints.responses import (
     GenericTaskStatusResponse,
     ScanTaskStatusResponse,
     SyncTaskStatusResponse,
+    TaskCancelResponse,
     TaskExecutionResponse,
     TaskStatusResponse,
     UpdateTaskStatusResponse,
     WatcherTaskStatusResponse,
 )
 from endpoints.responses.tasks import GroupedTasksDict, TaskInfo
+from exceptions.task_exceptions import TaskAlreadyQueuedException
 from handler.auth.constants import Scope
 from handler.redis_handler import (
     default_queue,
@@ -33,11 +34,13 @@ from handler.redis_handler import (
     low_prio_queue,
     redis_client,
 )
+from logger.logger import log
 from tasks.manual.cleanup_missing_roms import cleanup_missing_roms_task
 from tasks.manual.recompute_save_content_hashes import (
     recompute_save_content_hashes_task,
 )
 from tasks.manual.sync_folder_scan import sync_folder_scan_task
+from tasks.queue import cancel_job, enqueue_task, queue_position
 from tasks.scheduled.cleanup_orphaned_resources import cleanup_orphaned_resources_task
 from tasks.scheduled.cleanup_zip_cache import cleanup_zip_cache_task
 from tasks.scheduled.convert_images_to_webp import convert_images_to_webp_task
@@ -170,6 +173,7 @@ def _build_task_status_response(
         "enqueued_at": enqueued_at,
         "started_at": started_at,
         "ended_at": ended_at,
+        "queue_position": queue_position(job),
     }
 
     if not task_type:
@@ -390,16 +394,16 @@ async def run_single_task(
             detail=f"Task '{task_name}' cannot be run",
         )
 
-    job = low_prio_queue.enqueue(
-        task_instance.run,
-        kwargs=task_kwargs or {},
-        job_timeout=task_instance.timeout,
-        result_ttl=TASK_RESULT_TTL,
-        meta={
-            "task_name": task_instance.title,
-            "task_type": task_instance.task_type.value,
-        },
-    )
+    try:
+        job = enqueue_task(task_instance, func_kwargs=task_kwargs or {})
+    except TaskAlreadyQueuedException as e:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Task '{task_name}' is already queued or running",
+            # Lets the caller follow the run that is already going. Absent when
+            # the debounce rejected the submission, which has no job to name.
+            headers={"X-Existing-Task-Id": e.job_id} if e.job_id else None,
+        ) from e
 
     return {
         "task_name": task_instance.title,
@@ -411,4 +415,33 @@ async def run_single_task(
             else datetime.now(timezone.utc).isoformat()
         ),
         "enqueued_at": job.enqueued_at.isoformat() if job.enqueued_at else None,
+        "queue_position": queue_position(job),
+    }
+
+
+@protected_route(router.delete, "/{task_id}", [Scope.TASKS_RUN])
+async def cancel_task(request: Request, task_id: str) -> TaskCancelResponse:
+    """Cancel a queued task, or ask a running one to stop.
+
+    Args:
+        request (Request): FastAPI Request object
+        task_id (str): Job ID of the task to cancel
+    Returns:
+        TaskCancelResponse: What cancelling the task did
+    """
+    try:
+        job = Job.fetch(task_id, connection=redis_client)
+    except Exception as e:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task with ID '{task_id}' not found",
+        ) from e
+
+    outcome = cancel_job(job)
+    log.info(f"Task {task_id} cancellation requested: {outcome.value}")
+
+    return {
+        "task_id": task_id,
+        "task_name": job.get_meta().get("task_name") or get_job_func_name(job),
+        "outcome": outcome,
     }

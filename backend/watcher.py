@@ -8,8 +8,7 @@ from typing import cast
 
 import sentry_sdk
 from opentelemetry import trace
-from rq import Worker
-from rq.job import Job, JobStatus
+from rq.job import Job
 
 from config import (
     ENABLE_RESCAN_ON_FILESYSTEM_CHANGE,
@@ -17,10 +16,9 @@ from config import (
     RESCAN_ON_FILESYSTEM_CHANGE_DELAY,
     SCAN_TIMEOUT,
     SENTRY_DSN,
-    TASK_RESULT_TTL,
 )
 from config.config_manager import config_manager as cm
-from endpoints.sockets.scan import scan_platforms
+from endpoints.sockets.scan import STOP_SCAN_FLAG, scan_platforms
 from handler.database import db_platform_handler
 from handler.metadata import (
     meta_flashpoint_handler,
@@ -36,12 +34,12 @@ from handler.metadata import (
     meta_ss_handler,
     meta_tgdb_handler,
 )
-from handler.redis_handler import get_job_func_name, low_prio_queue, redis_client
 from handler.scan_handler import MetadataSource, ScanType
 from logger.formatter import CYAN
 from logger.formatter import highlight as hl
 from logger.logger import log
-from tasks.tasks import TaskType, tasks_scheduler
+from tasks.queue import enqueue_func, pending_jobs_for
+from tasks.tasks import SCAN_JOB_GROUP, TaskType
 from utils import get_version
 
 sentry_sdk.init(
@@ -70,48 +68,45 @@ VALID_EVENTS = frozenset(
 Change = tuple[EventType, str]
 
 
-def get_pending_scan_jobs() -> list[Job]:
-    """Get all pending scan jobs (scheduled, queued, or running) for scan_platforms function.
+def scanned_platform_ids(job: Job) -> list[int] | None:
+    """The platforms a pending scan covers, or None when it covers everything.
 
-    Returns:
-        list[Job]: List of pending scan jobs that are not completed or failed
+    Scans are enqueued with keyword arguments, so the platform list is in
+    ``kwargs`` rather than ``args``.
     """
-    pending_jobs = []
+    platform_ids = job.kwargs.get("platform_ids") if job.kwargs else None
+    return platform_ids or None
 
-    # Get jobs from the scheduler (delayed/scheduled jobs)
-    scheduled_jobs = tasks_scheduler.get_jobs()
-    for job in scheduled_jobs:
-        if (
-            isinstance(job, Job)
-            and get_job_func_name(job) == "endpoints.sockets.scan.scan_platforms"
-            and job.get_status()
-            in [JobStatus.SCHEDULED, JobStatus.QUEUED, JobStatus.STARTED]
-        ):
-            pending_jobs.append(job)
 
-    # Get jobs from the queue (immediate jobs)
-    queue_jobs = low_prio_queue.get_jobs()
-    for job in queue_jobs:
-        if (
-            isinstance(job, Job)
-            and get_job_func_name(job) == "endpoints.sockets.scan.scan_platforms"
-            and job.get_status() in [JobStatus.QUEUED, JobStatus.STARTED]
-        ):
-            pending_jobs.append(job)
+def _enqueue_scan(
+    *,
+    platform_ids: list[int],
+    metadata_sources: list[str],
+    scan_type: ScanType,
+    task_name: str,
+    delay: timedelta,
+) -> None:
+    """Queue a delayed scan for the platforms a change touched.
 
-    # Get currently running jobs from workers
-    workers = Worker.all(connection=redis_client)
-    for worker in workers:
-        current_job = worker.get_current_job()
-        if (
-            current_job
-            and get_job_func_name(current_job)
-            == "endpoints.sockets.scan.scan_platforms"
-            and current_job.get_status() == JobStatus.STARTED
-        ):
-            pending_jobs.append(current_job)
-
-    return pending_jobs
+    Deliberately not single-run: several platforms can change at once, and each
+    gets its own scan behind the others. The coverage check above is what keeps a
+    platform from being scanned twice over.
+    """
+    enqueue_func(
+        scan_platforms,
+        task_name=task_name,
+        task_type=TaskType.SCAN,
+        timeout=SCAN_TIMEOUT,
+        job_group=SCAN_JOB_GROUP,
+        single_run=False,
+        stop_flag=STOP_SCAN_FLAG,
+        func_kwargs={
+            "platform_ids": platform_ids,
+            "metadata_sources": metadata_sources,
+            "scan_type": scan_type,
+        },
+        delay=delay,
+    )
 
 
 def process_changes(changes: Sequence[Change]) -> None:
@@ -194,15 +189,13 @@ def process_changes(changes: Sequence[Change]) -> None:
             log.warning("No metadata sources enabled, skipping rescan")
             return
 
-        # Get currently pending scan jobs (scheduled, queued, or running)
-        pending_jobs = get_pending_scan_jobs()
+        # Scans already running, queued, or waiting out their delay
+        pending = pending_jobs_for(SCAN_JOB_GROUP)
 
-        # If a full rescan is already scheduled, skip further processing
-        full_rescan_jobs = [
-            job for job in pending_jobs if job.args and job.args[0] == []
-        ]
-        if full_rescan_jobs:
-            log.info(f"Full rescan already scheduled ({len(full_rescan_jobs)} job(s))")
+        # A pending scan with no platform list covers the whole library, so
+        # there is nothing left for this change to add
+        if any(scanned_platform_ids(job) is None for job in pending):
+            log.info("Full rescan already scheduled")
             return
 
         time_delta = timedelta(minutes=RESCAN_ON_FILESYSTEM_CHANGE_DELAY)
@@ -211,20 +204,20 @@ def process_changes(changes: Sequence[Change]) -> None:
         # Any change to a platform directory should trigger a full rescan
         if changes_platform_directory:
             log.info(f"Platform directory changed, {rescan_in_msg}")
-            tasks_scheduler.enqueue_in(
-                time_delta,
-                scan_platforms,
+            _enqueue_scan(
                 platform_ids=[],
                 metadata_sources=metadata_sources,
                 scan_type=ScanType.UPDATE,
-                timeout=SCAN_TIMEOUT,
-                job_result_ttl=TASK_RESULT_TTL,
-                meta={
-                    "task_name": "Unidentified Scan",
-                    "task_type": TaskType.SCAN,
-                },
+                task_name="Unidentified Scan",
+                delay=time_delta,
             )
             return
+
+        already_pending = {
+            platform_id
+            for job in pending
+            for platform_id in scanned_platform_ids(job) or ()
+        }
 
         # Otherwise, process each platform slug
         for fs_slug in fs_slugs:
@@ -234,31 +227,19 @@ def process_changes(changes: Sequence[Change]) -> None:
                 continue
 
             # Skip if a scan is already scheduled for this platform
-            platform_scan_jobs = [
-                job
-                for job in pending_jobs
-                if job.args and db_platform.id in job.args[0]
-            ]
-            if platform_scan_jobs:
-                log.info(
-                    f"Scan already scheduled for {hl(fs_slug)} ({len(platform_scan_jobs)} job(s))"
-                )
+            if db_platform.id in already_pending:
+                log.info(f"Scan already scheduled for {hl(fs_slug)}")
                 continue
 
             log.info(f"Change detected in {hl(fs_slug)} folder, {rescan_in_msg}")
-            tasks_scheduler.enqueue_in(
-                time_delta,
-                scan_platforms,
+            _enqueue_scan(
                 platform_ids=[db_platform.id],
                 metadata_sources=metadata_sources,
                 scan_type=ScanType.QUICK,
-                timeout=SCAN_TIMEOUT,
-                job_result_ttl=TASK_RESULT_TTL,
-                meta={
-                    "task_name": "Quick Scan",
-                    "task_type": TaskType.SCAN,
-                },
+                task_name="Quick Scan",
+                delay=time_delta,
             )
+            already_pending.add(db_platform.id)
 
 
 if __name__ == "__main__":

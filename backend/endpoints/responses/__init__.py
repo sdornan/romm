@@ -2,6 +2,7 @@ from typing import Literal, TypedDict, Union
 
 from rq_scheduler.scheduler import JobStatus
 
+from tasks.queue import CancelOutcome
 from tasks.tasks import TaskType
 
 
@@ -94,11 +95,20 @@ class TaskExecutionResponse(TypedDict):
     status: JobStatus
     created_at: str | None
     enqueued_at: str | None
+    # Jobs the worker gets through before this one, across all queues. None once
+    # the job is no longer waiting.
+    queue_position: int | None
 
 
 class BaseTaskStatusResponse(TaskExecutionResponse):
     started_at: str | None
     ended_at: str | None
+
+
+class TaskCancelResponse(TypedDict):
+    task_id: str
+    task_name: str
+    outcome: CancelOutcome
 
 
 class ScanTaskStatusResponse(BaseTaskStatusResponse):

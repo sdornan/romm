@@ -39,7 +39,7 @@ def test_enqueue_recompute_fires_when_missing_hashes_present(mocker):
     )
     # Job timeout must be passed; otherwise long-running recomputes get killed
     # by RQ's default short timeout on very large libraries.
-    assert kwargs["job_timeout"] == startup.TASK_TIMEOUT
+    assert kwargs["job_timeout"] == (startup.recompute_save_content_hashes_task.timeout)
     assert kwargs["job_id"] == startup.RECOMPUTE_SAVE_HASHES_JOB_ID
 
 
@@ -104,7 +104,7 @@ def test_enqueue_convert_webp_fires_when_not_queued(mocker):
     assert kwargs["meta"]["task_type"] == (
         startup.convert_images_to_webp_task.task_type.value
     )
-    assert kwargs["job_timeout"] == startup.TASK_TIMEOUT
+    assert kwargs["job_timeout"] == startup.convert_images_to_webp_task.timeout
     assert kwargs["job_id"] == startup.CONVERT_IMAGES_TO_WEBP_JOB_ID
 
 

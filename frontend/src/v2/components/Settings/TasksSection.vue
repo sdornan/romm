@@ -6,17 +6,20 @@
 // button) inside a 2-column grid. Sub-headings split each cluster.
 //
 // Polls `tasksStore.fetchTaskStatus` every 5s while mounted so the
-// history feed updates in real time. Manual + scheduled tasks expose a
-// run button that posts to /tasks/{name}/run.
+// queue and history feeds update in real time. Manual + scheduled tasks
+// expose a run button that posts to /tasks/{name}/run, and anything
+// running or queued can be cancelled from the queue list.
 import { RBtn, RIcon, RSpinner } from "@v2/lib";
 import { storeToRefs } from "pinia";
-import { computed, onMounted, onUnmounted } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import taskApi from "@/services/api/task";
 import storeTasks from "@/stores/tasks";
 import { convertCronExperssion, formatTimestamp } from "@/utils";
 import { TaskStatusItem, type TaskStatusResponse } from "@/utils/tasks";
 import SettingsSection from "@/v2/components/Settings/SettingsSection.vue";
+import { useCan } from "@/v2/composables/useCan";
+import { useConfirm } from "@/v2/composables/useConfirm";
 import { useSnackbar } from "@/v2/composables/useSnackbar";
 
 defineOptions({ inheritAttrs: false });
@@ -26,6 +29,8 @@ const tasksStore = storeTasks();
 const { watcherTasks, scheduledTasks, manualTasks, taskStatuses } =
   storeToRefs(tasksStore);
 const snackbar = useSnackbar();
+const confirm = useConfirm();
+const canManageTasks = useCan("app.admin");
 
 const watcherTasksUI = computed(() =>
   watcherTasks.value.map((task) => ({
@@ -46,11 +51,28 @@ const manualTasksUI = computed(() =>
   manualTasks.value.map((task) => ({ ...task, icon: "mdi-broom" })),
 );
 
+const ACTIVE_STATUSES = ["queued", "started"];
+
 const completedStatuses = computed(() =>
-  taskStatuses.value.filter(
-    (task) => !["queued", "started"].includes(task.status),
-  ),
+  taskStatuses.value.filter((task) => !ACTIVE_STATUSES.includes(task.status)),
 );
+
+// Running first, then the queue in the order the worker will get to it.
+const activeStatuses = computed(() =>
+  taskStatuses.value
+    .filter((task) => ACTIVE_STATUSES.includes(task.status))
+    .sort((a, b) => {
+      if (a.status !== b.status) return a.status === "started" ? -1 : 1;
+      return (a.queue_position ?? 0) - (b.queue_position ?? 0);
+    }),
+);
+
+/** How far off a queued task is, or null when it is already running. */
+function waitLabel(task: TaskStatusResponse) {
+  if (task.status === "started" || task.queue_position === null) return null;
+  if (task.queue_position === 0) return t("settings.task-next-up");
+  return t("settings.tasks-ahead", { n: task.queue_position });
+}
 
 function isTaskRunning(name: string) {
   return taskStatuses.value.some(
@@ -65,17 +87,61 @@ async function runTask(name: string, title: string) {
       icon: "mdi-check-bold",
     });
   } catch (err) {
-    const e = err as {
-      response?: { data?: { detail?: string }; statusText?: string };
-      message?: string;
-    };
+    snackbar.error(errorMessage(err, t("settings.task-failed")), {
+      icon: "mdi-close-circle",
+    });
+  }
+}
+
+function errorMessage(err: unknown, fallback: string) {
+  const e = err as {
+    response?: { data?: { detail?: string }; statusText?: string };
+    message?: string;
+  };
+  return (
+    e?.response?.data?.detail ||
+    e?.response?.statusText ||
+    e?.message ||
+    fallback
+  );
+}
+
+const cancelling = ref<string[]>([]);
+
+async function cancelTask(task: TaskStatusResponse) {
+  const title = task.task_name;
+  const ok = await confirm({
+    title: t("settings.cancel-task-title"),
+    body:
+      task.status === "started"
+        ? t("settings.cancel-task-body-running", { title })
+        : t("settings.cancel-task-body-queued", { title }),
+    tone: "danger",
+  });
+  if (!ok) return;
+
+  cancelling.value = [...cancelling.value, task.task_id];
+  try {
+    const { data } = await taskApi.cancelTask(task.task_id);
+    if (data.outcome === "stopping") {
+      snackbar.info(t("settings.task-stopping", { title }));
+    } else if (data.outcome === "already_done") {
+      snackbar.info(t("settings.task-already-finished", { title }));
+    } else {
+      snackbar.success(t("settings.task-canceled", { title }), {
+        icon: "mdi-check-bold",
+      });
+    }
+    await fetchTaskStatus();
+  } catch (err) {
     snackbar.error(
-      e?.response?.data?.detail ||
-        e?.response?.statusText ||
-        e?.message ||
-        t("settings.task-failed"),
+      t("settings.couldnt-cancel-task", {
+        error: errorMessage(err, t("common.unknown-error")),
+      }),
       { icon: "mdi-close-circle" },
     );
+  } finally {
+    cancelling.value = cancelling.value.filter((id) => id !== task.task_id);
   }
 }
 
@@ -203,6 +269,43 @@ function statusInfo(task: TaskStatusResponse) {
             @click="runTask(task.name, task.title)"
           >
             <RIcon icon="mdi-play" size="14" />
+          </button>
+        </div>
+      </div>
+    </template>
+
+    <!-- Queue: what is running now and what is waiting behind it -->
+    <template v-if="activeStatuses.length > 0">
+      <div class="r-v2-tasks__sub-heading">
+        {{ t("settings.task-queue") }}
+      </div>
+      <div class="r-v2-tasks__history">
+        <div
+          v-for="entry in activeStatuses"
+          :key="entry.task_id"
+          class="r-v2-tasks__history-row"
+        >
+          <span
+            class="r-v2-tasks__history-status"
+            :class="`r-v2-tasks__history-status--${statusInfo(entry).status}`"
+          >
+            {{ statusInfo(entry).text }}
+          </span>
+          <span class="r-v2-tasks__history-name">{{ entry.task_name }}</span>
+          <span v-if="waitLabel(entry)" class="r-v2-tasks__queue-wait">
+            {{ waitLabel(entry) }}
+          </span>
+          <button
+            v-if="canManageTasks"
+            type="button"
+            class="r-v2-tasks__cancel-btn"
+            :disabled="cancelling.includes(entry.task_id)"
+            :aria-label="t('settings.cancel-task', { title: entry.task_name })"
+            :title="t('settings.cancel-task', { title: entry.task_name })"
+            @click="cancelTask(entry)"
+          >
+            <RSpinner v-if="cancelling.includes(entry.task_id)" :size="12" />
+            <RIcon v-else icon="mdi-close" size="14" />
           </button>
         </div>
       </div>
@@ -393,6 +496,46 @@ html[data-bp~="xs"] .r-v2-tasks__row--two-col {
   flex: 1;
   font-weight: var(--r-font-weight-medium);
   color: var(--r-color-fg-secondary);
+}
+
+.r-v2-tasks__queue-wait {
+  color: var(--r-color-fg-faint);
+  white-space: nowrap;
+}
+
+.r-v2-tasks__cancel-btn {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid var(--r-color-border);
+  background: var(--r-color-surface);
+  color: var(--r-color-fg-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    background var(--r-motion-fast) var(--r-motion-ease-out),
+    border-color var(--r-motion-fast) var(--r-motion-ease-out),
+    color var(--r-motion-fast) var(--r-motion-ease-out);
+}
+.r-v2-tasks__cancel-btn:hover:not(:disabled) {
+  background: color-mix(
+    in srgb,
+    var(--r-color-status-base-danger) 14%,
+    transparent
+  );
+  border-color: color-mix(
+    in srgb,
+    var(--r-color-status-base-danger) 50%,
+    transparent
+  );
+  color: var(--r-color-danger);
+}
+.r-v2-tasks__cancel-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 .r-v2-tasks__history-when {
   color: var(--r-color-fg-faint);

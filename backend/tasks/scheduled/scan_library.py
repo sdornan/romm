@@ -2,7 +2,7 @@ from config import (
     ENABLE_SCHEDULED_RESCAN,
     SCHEDULED_RESCAN_CRON,
 )
-from endpoints.sockets.scan import ScanStats, scan_platforms
+from endpoints.sockets.scan import STOP_SCAN_FLAG, ScanStats, scan_platforms
 from handler.metadata import (
     meta_flashpoint_handler,
     meta_hasheous_handler,
@@ -19,7 +19,12 @@ from handler.metadata import (
 )
 from handler.scan_handler import MetadataSource, ScanType
 from logger.logger import log
-from tasks.tasks import SCAN_LIBRARY_TASK_FUNC, PeriodicTask, TaskType
+from tasks.tasks import (
+    SCAN_JOB_GROUP,
+    SCAN_LIBRARY_TASK_FUNC,
+    PeriodicTask,
+    TaskType,
+)
 
 
 class ScanLibraryTask(PeriodicTask):
@@ -32,6 +37,8 @@ class ScanLibraryTask(PeriodicTask):
             manual_run=False,
             cron_string=SCHEDULED_RESCAN_CRON,
             func=SCAN_LIBRARY_TASK_FUNC,
+            job_group=SCAN_JOB_GROUP,
+            stop_flag=STOP_SCAN_FLAG,
         )
 
     async def run(self) -> dict[str, str]:

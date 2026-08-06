@@ -9,5 +9,6 @@ export type TaskExecutionResponse = {
     status: JobStatus;
     created_at: (string | null);
     enqueued_at: (string | null);
+    queue_position: (number | null);
 };
 

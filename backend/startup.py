@@ -14,7 +14,6 @@ from config import (
     ENABLE_SCHEDULED_UPDATE_SWITCH_TITLEDB,
     ENABLE_SYNC_PUSH_PULL,
     SENTRY_DSN,
-    TASK_TIMEOUT,
 )
 from handler.database import db_save_handler
 from handler.metadata.base_handler import (
@@ -32,6 +31,7 @@ from models.firmware import FIRMWARE_FIXTURES_DIR, KNOWN_BIOS_KEY
 from tasks.manual.recompute_save_content_hashes import (
     recompute_save_content_hashes_task,
 )
+from tasks.queue import enqueue_task
 from tasks.scheduled.cleanup_netplay import cleanup_netplay_task
 from tasks.scheduled.cleanup_orphaned_resources import cleanup_orphaned_resources_task
 from tasks.scheduled.cleanup_upload_tmp import cleanup_upload_tmp_task
@@ -82,14 +82,9 @@ def _enqueue_recompute_save_hashes_if_needed() -> None:
             )
             return
 
-        low_prio_queue.enqueue(
-            recompute_save_content_hashes_task.run,
+        enqueue_task(
+            recompute_save_content_hashes_task,
             job_id=RECOMPUTE_SAVE_HASHES_JOB_ID,
-            job_timeout=TASK_TIMEOUT,
-            meta={
-                "task_name": recompute_save_content_hashes_task.title,
-                "task_type": recompute_save_content_hashes_task.task_type.value,
-            },
         )
         log.info(
             f"Enqueued recompute_save_content_hashes ({missing} saves with NULL content_hash); "
@@ -117,14 +112,9 @@ def _enqueue_convert_images_to_webp() -> None:
             )
             return
 
-        low_prio_queue.enqueue(
-            convert_images_to_webp_task.run,
+        enqueue_task(
+            convert_images_to_webp_task,
             job_id=CONVERT_IMAGES_TO_WEBP_JOB_ID,
-            job_timeout=TASK_TIMEOUT,
-            meta={
-                "task_name": convert_images_to_webp_task.title,
-                "task_type": convert_images_to_webp_task.task_type.value,
-            },
         )
         log.info("Enqueued convert_images_to_webp backfill on low-priority worker")
     except Exception:

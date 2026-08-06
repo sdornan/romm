@@ -4,6 +4,9 @@ import pytest
 from fastapi import status
 from rq.exceptions import NoSuchJobError
 
+from exceptions.task_exceptions import TaskAlreadyQueuedException
+from handler.redis_handler import QueuePrio
+from tasks.queue import CancelOutcome
 from tasks.tasks import Task, TaskType
 
 
@@ -53,6 +56,25 @@ def mock_non_manual_task():
     task.timeout = 300
     task.run = Mock()
     return task
+
+
+def make_mock_task(**overrides):
+    """A Task stand-in with every attribute the endpoints read."""
+    attrs = {
+        "task_type": TaskType.CLEANUP,
+        "title": "Test Task",
+        "description": "Test Description",
+        "enabled": True,
+        "manual_run": True,
+        "can_run_manually": True,
+        "timeout": 300,
+        "queue_prio": QueuePrio.LOW,
+        "job_group": None,
+        "stop_flag": None,
+        "run": Mock(),
+    }
+    attrs.update(overrides)
+    return Mock(spec=Task, **attrs)
 
 
 def create_mock_job(job_id="1", status="queued"):
@@ -214,29 +236,22 @@ class TestListTasks:
 class TestRunSingleTask:
     """Test suite for the run_single_task endpoint"""
 
-    @patch("endpoints.tasks.low_prio_queue.enqueue", return_value=create_mock_job())
+    @patch("endpoints.tasks.queue_position", return_value=None)
+    @patch("endpoints.tasks.enqueue_task", return_value=create_mock_job())
     @patch(
         "endpoints.tasks.manual_tasks",
         [
             {
                 "name": "test_task",
                 "type": TaskType.CLEANUP,
-                "task": Mock(
-                    spec=Task,
-                    task_type=TaskType.CLEANUP,
-                    title="Test Task",
-                    description="Test Description",
-                    enabled=True,
-                    manual_run=True,
-                    can_run_manually=True,
-                    timeout=300,
-                    run=Mock(),
-                ),
+                "task": make_mock_task(),
             }
         ],
     )
     @patch("endpoints.tasks.scheduled_tasks", [])
-    def test_run_single_task_success(self, mock_queue, client, access_token):
+    def test_run_single_task_success(
+        self, mock_queue, mock_position, client, access_token
+    ):
         """Test successful running of a single task"""
         response = client.post(
             "/api/tasks/run/test_task",
@@ -384,6 +399,89 @@ class TestGetTasksStatus:
 
         assert response.status_code == status.HTTP_200_OK
         assert response.json() == []
+
+
+class TestRunSingleTaskDuplicates:
+    """A task already queued or running must not be queued a second time."""
+
+    @patch(
+        "endpoints.tasks.enqueue_task",
+        side_effect=TaskAlreadyQueuedException("cleanup", "existing-job-id"),
+    )
+    @patch(
+        "endpoints.tasks.manual_tasks",
+        [
+            {
+                "name": "test_task",
+                "type": TaskType.CLEANUP,
+                "task": make_mock_task(job_group="cleanup"),
+            }
+        ],
+    )
+    @patch("endpoints.tasks.scheduled_tasks", [])
+    def test_conflicts_when_already_queued(self, mock_enqueue, client, access_token):
+        response = client.post(
+            "/api/tasks/run/test_task",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+
+        assert response.status_code == status.HTTP_409_CONFLICT
+        assert "already queued" in response.json()["detail"]
+        # The caller needs the running job's id to follow its progress instead.
+        assert response.headers["X-Existing-Task-Id"] == "existing-job-id"
+
+
+class TestCancelTask:
+    """Test suite for the cancel_task endpoint"""
+
+    def _job(self, status_value="queued"):
+        job = Mock()
+        job.id = "job-1"
+        job.get_status.return_value = status_value
+        job.get_meta.return_value = {"task_name": "Test Task"}
+        job.func_name = "test_task"
+        return job
+
+    @patch("endpoints.tasks.cancel_job", return_value=CancelOutcome.CANCELED)
+    @patch("endpoints.tasks.Job.fetch")
+    def test_cancels_a_queued_task(self, mock_fetch, mock_cancel, client, access_token):
+        mock_fetch.return_value = self._job()
+
+        response = client.delete(
+            "/api/tasks/job-1", headers={"Authorization": f"Bearer {access_token}"}
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["outcome"] == "canceled"
+        assert data["task_id"] == "job-1"
+        assert data["task_name"] == "Test Task"
+
+    @patch("endpoints.tasks.cancel_job", return_value=CancelOutcome.STOPPING)
+    @patch("endpoints.tasks.Job.fetch")
+    def test_reports_a_running_task_as_stopping(
+        self, mock_fetch, mock_cancel, client, access_token
+    ):
+        mock_fetch.return_value = self._job("started")
+
+        response = client.delete(
+            "/api/tasks/job-1", headers={"Authorization": f"Bearer {access_token}"}
+        )
+
+        assert response.json()["outcome"] == "stopping"
+
+    @patch("endpoints.tasks.Job.fetch", side_effect=NoSuchJobError("nope"))
+    def test_unknown_task_is_not_found(self, mock_fetch, client, access_token):
+        response = client.delete(
+            "/api/tasks/missing", headers={"Authorization": f"Bearer {access_token}"}
+        )
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_unauthenticated(self, client):
+        response = client.delete("/api/tasks/job-1")
+
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
 
 class TestGetTaskById:
@@ -547,11 +645,9 @@ class TestIntegration:
 
     @patch("endpoints.tasks.ENABLE_RESCAN_ON_FILESYSTEM_CHANGE", True)
     @patch("endpoints.tasks.RESCAN_ON_FILESYSTEM_CHANGE_DELAY", 5)
-    @patch(
-        "endpoints.tasks.low_prio_queue.enqueue",
-        return_value=create_mock_job(),
-    )
-    def test_full_workflow(self, mock_queue, client, access_token):
+    @patch("endpoints.tasks.queue_position", return_value=None)
+    @patch("endpoints.tasks.enqueue_task", return_value=create_mock_job())
+    def test_full_workflow(self, mock_queue, mock_position, client, access_token):
         """Test a complete workflow: list tasks, then run a specific task"""
         # First, list all tasks
         list_response = client.get(
@@ -566,16 +662,8 @@ class TestIntegration:
                 {
                     "name": "workflow_task",
                     "type": TaskType.CLEANUP,
-                    "task": Mock(
-                        spec=Task,
-                        task_type=TaskType.CLEANUP,
-                        title="Workflow Task",
-                        description="Workflow Description",
-                        enabled=True,
-                        manual_run=True,
-                        can_run_manually=True,
-                        timeout=300,
-                        run=Mock(),
+                    "task": make_mock_task(
+                        title="Workflow Task", description="Workflow Description"
                     ),
                 }
             ],

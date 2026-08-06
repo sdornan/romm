@@ -38,6 +38,7 @@ export type { Body_update_smart_collection_api_collections_smart__id__put } from
 export type { Body_update_state_api_states__id__put } from './models/Body_update_state_api_states__id__put';
 export type { Body_update_state_visibility_api_states__id__visibility_put } from './models/Body_update_state_visibility_api_states__id__visibility_put';
 export type { BulkOperationResponse } from './models/BulkOperationResponse';
+export type { CancelOutcome } from './models/CancelOutcome';
 export type { ClaimSessionRequest } from './models/ClaimSessionRequest';
 export type { CleanupTaskMeta } from './models/CleanupTaskMeta';
 export type { CleanupTaskStatusResponse } from './models/CleanupTaskStatusResponse';
@@ -185,6 +186,7 @@ export type { SyncSessionSchema } from './models/SyncSessionSchema';
 export type { SyncTaskMeta } from './models/SyncTaskMeta';
 export type { SyncTaskStatusResponse } from './models/SyncTaskStatusResponse';
 export type { SystemDict } from './models/SystemDict';
+export type { TaskCancelResponse } from './models/TaskCancelResponse';
 export type { TaskExecutionResponse } from './models/TaskExecutionResponse';
 export type { TaskInfo } from './models/TaskInfo';
 export type { TasksDict } from './models/TasksDict';
