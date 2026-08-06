@@ -24,6 +24,7 @@
 import { debounce } from "lodash";
 import type { Emitter } from "mitt";
 import { inject } from "vue";
+import { useI18n } from "vue-i18n";
 import type { ScanStats } from "@/__generated__";
 import platformApi from "@/services/api/platform";
 import storePlatforms from "@/stores/platforms";
@@ -33,7 +34,12 @@ import type { Events } from "@/types/emitter";
 import { useSocketEvent } from "@/v2/composables/useSocketEvent";
 import storeGalleryRoms from "@/v2/stores/galleryRoms";
 
+/** `scan:done` payload. A scan that unwound on request sets `stopped`; one that
+ *  ran to completion omits it. */
+export type ScanDonePayload = ScanStats & { stopped?: boolean };
+
 export function installScanLifecycle() {
+  const { t } = useI18n();
   const scanningStore = storeScanning();
   const romsStore = storeRoms();
   const platformsStore = storePlatforms();
@@ -166,24 +172,36 @@ export function installScanLifecycle() {
     scanningStore.setScanStats(stats);
   });
 
-  useSocketEvent<ScanStats>("scan:done", (stats) => {
+  useSocketEvent<ScanDonePayload>("scan:done", (stats) => {
     scanningStore.setScanStats(stats);
     scanningStore.setScanning(false);
     // Reconcile against the backend once the scan settles: pick up anything
     // the live updates missed and correct rom_counts that drifted.
     void platformsStore.fetchPlatforms();
-    emitter?.emit("snackbarShow", {
-      msg: "Scan completed successfully.",
-      color: "success",
-      icon: "mdi-check-bold",
-      timeout: 4000,
-    });
+    // A stopped scan takes this same path: it unwinds and reports what it got
+    // through, so saying it completed would misreport what the user asked for.
+    emitter?.emit(
+      "snackbarShow",
+      stats.stopped
+        ? {
+            msg: t("scan.scan-stopped"),
+            color: "warning",
+            icon: "mdi-stop-circle",
+            timeout: 4000,
+          }
+        : {
+            msg: t("scan.scan-completed"),
+            color: "success",
+            icon: "mdi-check-bold",
+            timeout: 4000,
+          },
+    );
   });
 
   useSocketEvent<string>("scan:done_ko", (msg) => {
     scanningStore.setScanning(false);
     emitter?.emit("snackbarShow", {
-      msg: `Scan failed: ${msg}`,
+      msg: t("scan.scan-failed", { error: msg }),
       color: "error",
       icon: "mdi-close-circle",
       timeout: 6000,

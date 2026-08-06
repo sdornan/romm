@@ -48,6 +48,7 @@ from tasks.scheduled.scan_library import scan_library_task
 from tasks.scheduled.update_launchbox_metadata import update_launchbox_metadata_task
 from tasks.scheduled.update_switch_titledb import update_switch_titledb_task
 from tasks.tasks import (
+    META_STOPPED,
     Task,
     TaskType,
 )
@@ -152,6 +153,20 @@ def _build_task_info(name: str, task: Task) -> TaskInfo:
     )
 
 
+def _reported_status(job: Job, job_meta: dict[str, Any]) -> JobStatus | None:
+    """The job's status, corrected for tasks that unwound on request.
+
+    A task asked to stop polls its stop flag and returns normally, so RQ records
+    it as finished. Only the task itself knows it did not run to completion, and
+    it says so in its meta.
+    """
+    status = job.get_status()
+    if status == JobStatus.FINISHED and job_meta.get(META_STOPPED):
+        return JobStatus.STOPPED
+
+    return status
+
+
 def _build_task_status_response(
     job: Job,
 ) -> TaskStatusResponse:
@@ -168,7 +183,7 @@ def _build_task_status_response(
     common_data = {
         "task_name": task_name,
         "task_id": job.id,
-        "status": job.get_status(),
+        "status": _reported_status(job, job_meta),
         "created_at": created_at,
         "enqueued_at": enqueued_at,
         "started_at": started_at,

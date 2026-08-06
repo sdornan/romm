@@ -37,6 +37,7 @@ from tasks.tasks import (
     META_CRON_STRING,
     META_JOB_GROUP,
     META_STOP_FLAG,
+    META_STOPPED,
     SCAN_JOB_GROUP,
 )
 
@@ -1374,3 +1375,84 @@ class TestStopScan:
         await stop_scan_handler("sid")
 
         redis.set.assert_not_called()
+
+
+class TestStoppedScanReporting:
+    """A stopped scan must not report itself as a completed one.
+
+    It unwinds and returns normally, so RQ records success — the distinction has
+    to be carried explicitly or both the snackbar and the task list call it done.
+    """
+
+    @pytest.fixture
+    def socket_manager(self, mocker):
+        manager = AsyncMock()
+        mocker.patch.object(scan_module, "_get_socket_manager", return_value=manager)
+        return manager
+
+    @pytest.fixture(autouse=True)
+    def stopped_before_it_starts(self, mocker, socket_manager):
+        """Trip the stop flag on the first poll so the scan unwinds immediately."""
+        mocker.patch.object(scan_module, "redis_client")
+        mocker.patch.object(
+            scan_module, "begin_ss_scan", new=AsyncMock(return_value=None)
+        )
+        mocker.patch.object(
+            scan_module.fs_platform_handler,
+            "get_platforms",
+            AsyncMock(return_value=["genesis"]),
+        )
+        mocker.patch.object(
+            scan_module.fs_rom_handler, "count_roms", AsyncMock(return_value=0)
+        )
+        mocker.patch.object(scan_module.meta_gamelist_handler, "clear_cache")
+        mocker.patch.object(
+            scan_module.db_platform_handler, "mark_missing_platforms", return_value=[]
+        )
+        mocker.patch.object(
+            scan_module.db_platform_handler, "get_platforms", return_value=[]
+        )
+        mocker.patch.object(
+            scan_module.db_rom_handler, "invalidate_filter_values_cache"
+        )
+        config = MagicMock()
+        config.GAMELIST_AUTO_EXPORT_ON_SCAN = False
+        config.PEGASUS_AUTO_EXPORT_ON_SCAN = False
+        mocker.patch.object(scan_module.cm, "get_config", return_value=config)
+        mocker.patch.object(
+            scan_module,
+            "_identify_platform",
+            side_effect=scan_module.ScanStoppedException(),
+        )
+
+    async def _done_payload(self, socket_manager):
+        await scan_platforms(platform_ids=[], metadata_sources=[])
+        done = [
+            call
+            for call in socket_manager.emit.await_args_list
+            if call.args and call.args[0] == "scan:done"
+        ]
+        assert done, "a stopped scan still has to close out the client's progress"
+        return done[-1].args[1]
+
+    async def test_marks_the_payload_stopped(self, socket_manager):
+        payload = await self._done_payload(socket_manager)
+
+        assert payload["stopped"] is True
+
+    async def test_still_reports_the_stats_it_got_through(self, socket_manager):
+        # The work already done is kept, so the client's final numbers must stand.
+        payload = await self._done_payload(socket_manager)
+
+        assert "scanned_platforms" in payload
+
+    async def test_records_stopped_in_job_meta(self, mocker, socket_manager):
+        # The task list reads meta; without this a stopped scan shows as finished.
+        update_meta = mocker.patch.object(scan_module, "update_job_meta")
+
+        await scan_platforms(platform_ids=[], metadata_sources=[])
+
+        assert any(
+            call.args and call.args[0].get(META_STOPPED) is True
+            for call in update_meta.call_args_list
+        )

@@ -33,6 +33,13 @@ META_JOB_GROUP: Final = "job_group"
 META_STOP_FLAG: Final = "stop_flag"
 META_CRON_STRING: Final = "cron_string"
 
+# Set by a task that unwound because it was asked to stop. RQ's own STOPPED
+# status is not reachable from here: the worker sets it when it kills a work
+# horse, while a task that stops cooperatively returns normally and is recorded
+# as finished. Status describes how the callable exited; this describes what the
+# task decided, so it belongs in meta.
+META_STOPPED: Final = "stopped"
+
 
 def update_job_meta(metadata: dict[str, Any]) -> None:
     """Update the current RQ job's meta data with update stats information"""

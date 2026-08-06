@@ -68,7 +68,7 @@ from tasks.queue import (
     pending_jobs_for,
     running_job_for,
 )
-from tasks.tasks import SCAN_JOB_GROUP, update_job_meta
+from tasks.tasks import META_STOPPED, SCAN_JOB_GROUP, update_job_meta
 from utils import emoji
 from utils.audio_tags import remove_persisted_cover
 from utils.context import initialize_context
@@ -871,8 +871,17 @@ async def scan_platforms(
     )
 
     async def stop_scan():
+        """Report an interrupted scan as stopped rather than complete.
+
+        A cooperative stop returns normally, so RQ records success and the task
+        list would call it finished. The flag is what tells both surfaces apart:
+        job meta for the task list, the payload for the client watching live.
+        """
         log.info(f"{emoji.EMOJI_STOP_SIGN} Scan stopped manually")
-        await socket_manager.emit("scan:done", scan_stats.to_dict())
+        update_job_meta({META_STOPPED: True})
+        await socket_manager.emit(
+            "scan:done", {**scan_stats.to_dict(), "stopped": True}
+        )
         redis_client.delete(STOP_SCAN_FLAG)
 
     try:

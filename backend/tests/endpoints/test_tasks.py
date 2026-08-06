@@ -684,3 +684,50 @@ class TestIntegration:
             headers={"Authorization": f"Bearer {access_token}"},
         )
         assert response.status_code == status.HTTP_404_NOT_FOUND
+
+
+class TestStoppedStatusReporting:
+    """A task that unwound on request must not be reported as finished."""
+
+    def _job(self, meta):
+        job = Mock()
+        job.id = "job-1"
+        job.get_status.return_value = "finished"
+        job.get_meta.return_value = meta
+        job.func_name = "scan"
+        for field in ("created_at", "enqueued_at", "started_at", "ended_at"):
+            stamp = Mock()
+            stamp.isoformat.return_value = "2026-08-06T10:00:00"
+            setattr(job, field, stamp)
+        return job
+
+    @patch("endpoints.tasks.queue_position", return_value=None)
+    @patch("endpoints.tasks.Job.fetch")
+    def test_stopped_meta_overrides_finished(
+        self, mock_fetch, mock_position, client, access_token
+    ):
+        mock_fetch.return_value = self._job(
+            {"task_name": "Complete Scan", "task_type": "scan", "stopped": True}
+        )
+
+        response = client.get(
+            "/api/tasks/job-1", headers={"Authorization": f"Bearer {access_token}"}
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["status"] == "stopped"
+
+    @patch("endpoints.tasks.queue_position", return_value=None)
+    @patch("endpoints.tasks.Job.fetch")
+    def test_a_completed_task_still_reports_finished(
+        self, mock_fetch, mock_position, client, access_token
+    ):
+        mock_fetch.return_value = self._job(
+            {"task_name": "Complete Scan", "task_type": "scan"}
+        )
+
+        response = client.get(
+            "/api/tasks/job-1", headers={"Authorization": f"Bearer {access_token}"}
+        )
+
+        assert response.json()["status"] == "finished"
