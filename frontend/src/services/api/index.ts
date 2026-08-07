@@ -3,6 +3,7 @@ import { default as Cookies } from "js-cookie";
 import { debounce } from "lodash";
 import router from "@/plugins/router";
 import { ROUTES, isAuthExemptRoute } from "@/plugins/router";
+import socket from "@/services/socket";
 
 const api = axios.create({
   // This will keep the url query params on refresh
@@ -46,6 +47,14 @@ api.interceptors.request.use((config) => {
 
   // Set CSRF header for all requests
   config.headers["x-csrftoken"] = Cookies.get("romm_csrftoken");
+
+  // Identify the socket this request came from, so a mutation broadcast back
+  // over that socket can be recognised as our own echo and skipped. Per
+  // connection rather than per user: two tabs of the same account are two
+  // clients, and on a single-user instance every client is the same user.
+  if (socket.connected && socket.id) {
+    config.headers["x-socket-id"] = socket.id;
+  }
   return config;
 });
 

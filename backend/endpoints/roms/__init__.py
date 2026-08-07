@@ -45,6 +45,11 @@ from endpoints.responses.rom import (
     RomUserSchema,
     SimpleRomSchema,
 )
+from endpoints.sockets.roms import (
+    acting_client_id,
+    broadcast_roms_deleted,
+    broadcast_roms_updated,
+)
 from exceptions.endpoint_exceptions import RomNotFoundInDatabaseException
 from exceptions.fs_exceptions import RomAlreadyExistsException
 from handler.auth.constants import Scope
@@ -1643,6 +1648,7 @@ async def update_rom(
 
         db_rom_handler.invalidate_filter_values_cache()
         refresh_affected_smart_collections([id])
+        await broadcast_roms_updated([id], request.user.id, acting_client_id(request))
         return DetailedRomSchema.from_orm_with_request(rom, request)
 
     provided_fields = form_data.model_fields_set
@@ -2011,6 +2017,7 @@ async def update_rom(
 
     db_rom_handler.invalidate_filter_values_cache()
     refresh_affected_smart_collections([id])
+    await broadcast_roms_updated([id], request.user.id, acting_client_id(request))
     return DetailedRomSchema.from_orm_with_request(rom, request)
 
 
@@ -2142,6 +2149,9 @@ async def delete_roms(
         # Deleted ROMs would otherwise linger in the cached smart collection
         # membership until the next scan.
         refresh_affected_smart_collections(deleted_ids)
+        await broadcast_roms_deleted(
+            deleted_ids, request.user.id, acting_client_id(request)
+        )
 
     return {
         "successful_items": len(deleted_ids),
@@ -2202,4 +2212,5 @@ async def update_rom_user(
     if STATUS_MEMBERSHIP_FIELDS & cleaned_data.keys():
         refresh_affected_smart_collections([id], membership_only=True)
 
+    await broadcast_roms_updated([id], request.user.id, acting_client_id(request))
     return RomUserSchema.model_validate(rom_user)
