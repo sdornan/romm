@@ -73,6 +73,9 @@ vi.mock("@/v2/composables/useClipboard", () => ({
 vi.mock("@/v2/composables/useConfirm", () => ({
   useConfirm: () => confirmFn,
 }));
+vi.mock("@/v2/composables/useRomSync", () => ({
+  useRomSync: () => ({ syncRom: vi.fn(), applyRomWrite: vi.fn() }),
+}));
 vi.mock("@/v2/composables/useSnackbar", () => ({
   useSnackbar: () => ({ success: vi.fn(), error: vi.fn() }),
 }));
