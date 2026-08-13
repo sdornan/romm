@@ -63,12 +63,16 @@ const WINDOW_SIZE = 72;
 
 // In-flight `AbortController`s keyed by request: `window:${offset}`
 // for a windowed fetch, `bootstrap` for the lightweight metadata
-// bootstrap. Lives outside store state so Pinia doesn't
+// bootstrap, `romIdIndex` for the deferred id-index fill. Lives outside
+// store state so Pinia doesn't
 // try to proxy native abort objects (which break under reactivity).
 // `invalidateWindows()` / `resetGallery()` abort every pending request,
 // so a fast-typed search box or a platform-switch mid-load doesn't
 // leave server work going for results we'll throw away.
 const inFlightControllers = new Map<string, AbortController>();
+
+const BOOTSTRAP_KEY = "bootstrap";
+const ROM_ID_INDEX_KEY = "romIdIndex";
 
 // A failed window is only refetched when `fetchWindowAt` is called for it
 // again, which for a static viewport (no scroll) never happens on its own.
@@ -439,7 +443,11 @@ export default defineStore("v2GalleryRoms", {
      *
      * `sidecars` opts out of the aggregates the caller doesn't render; the
      * backend then serves `total` from a plain COUNT instead of a full
-     * ordered id scan. */
+     * ordered id scan.
+     *
+     * The id index is always left out of this request and fetched behind it
+     * (see `_fetchRomIdIndex`): nothing on screen needs it to paint, and it
+     * is the one sidecar that sorts and ships the entire result set. */
     async fetchInitialMetadata(sidecars: SidecarOptions = {}): Promise<void> {
       if (this.metadataLoaded) return;
       if (this.initialFetching) return;
@@ -449,14 +457,22 @@ export default defineStore("v2GalleryRoms", {
       const galleryFilter = storeGalleryFilter();
       const platformsStore = storePlatforms();
       const params = this._buildRequestParams(galleryFilter, 0);
-      const ctrlKey = "bootstrap";
       const controller = new AbortController();
-      inFlightControllers.set(ctrlKey, controller);
+      inFlightControllers.set(BOOTSTRAP_KEY, controller);
+
+      // Dropping the id index here makes the backend size the page with a
+      // plain COUNT, which skips the ordered scan's sort and the id payload.
+      // A caller that opted out of the index entirely gets no follow-up.
+      const wantsRomIdIndex = sidecars.withRomIdIndex !== false;
+      const bootstrapSidecars: SidecarOptions = {
+        ...sidecars,
+        withRomIdIndex: false,
+      };
 
       try {
         const response = await romApi.getRoms({
           ...params,
-          ...sidecars,
+          ...bootstrapSidecars,
           limit: 1,
           signal: controller.signal,
         });
@@ -464,20 +480,64 @@ export default defineStore("v2GalleryRoms", {
         // invalidateWindows / resetGallery may have aborted us and a
         // newer bootstrap may have replaced our entry under the same key.
         // Identity comparison avoids applying stale metadata in that race.
-        if (inFlightControllers.get(ctrlKey) !== controller) return;
+        if (inFlightControllers.get(BOOTSTRAP_KEY) !== controller) return;
         this._applyMetadata(
           response.data,
           galleryFilter,
           platformsStore,
-          sidecars,
+          bootstrapSidecars,
         );
       } catch (err) {
         if (axios.isCancel(err)) return;
         console.error("[v2GalleryRoms] bootstrap fetch failed", err);
+        return;
       } finally {
-        if (inFlightControllers.get(ctrlKey) === controller) {
-          inFlightControllers.delete(ctrlKey);
+        if (inFlightControllers.get(BOOTSTRAP_KEY) === controller) {
+          inFlightControllers.delete(BOOTSTRAP_KEY);
           this.initialFetching = false;
+        }
+      }
+
+      if (wantsRomIdIndex) void this._fetchRomIdIndex();
+    },
+
+    /** Fill `romIdIndex` after the gallery has already painted.
+     *
+     * The list backs the grid packer's position→id lookup and the detail
+     * view's prev/next arrows. Neither blocks first paint (the packer falls
+     * back to the default cover ratio until the ids land, then re-packs), so
+     * the full ordered scan runs off the critical path instead of holding up
+     * every filter change.
+     *
+     * Params are rebuilt here rather than carried over from the bootstrap:
+     * any filter change goes through `invalidateWindows`, which aborts this
+     * request, so the filter store still reflects the set being fetched. */
+    async _fetchRomIdIndex(): Promise<void> {
+      const galleryFilter = storeGalleryFilter();
+      const params = this._buildRequestParams(galleryFilter, 0);
+      const controller = new AbortController();
+      inFlightControllers.set(ROM_ID_INDEX_KEY, controller);
+
+      try {
+        const response = await romApi.getRoms({
+          ...params,
+          withCharIndex: false,
+          withFilterValues: false,
+          withRomIdIndex: true,
+          withTotal: false,
+          limit: 1,
+          signal: controller.signal,
+        });
+        if (inFlightControllers.get(ROM_ID_INDEX_KEY) !== controller) return;
+        if (response.data.rom_id_index) {
+          this.romIdIndex = response.data.rom_id_index;
+        }
+      } catch (err) {
+        if (axios.isCancel(err)) return;
+        console.error("[v2GalleryRoms] rom id index fetch failed", err);
+      } finally {
+        if (inFlightControllers.get(ROM_ID_INDEX_KEY) === controller) {
+          inFlightControllers.delete(ROM_ID_INDEX_KEY);
         }
       }
     },
@@ -527,7 +587,13 @@ export default defineStore("v2GalleryRoms", {
       // count the result set separately instead, which is the same scan under
       // another name for a total the bootstrap already gave us, so opt out of
       // that too and keep the window fetch to just its page of covers.
-      const withAggregations = !this.metadataLoaded;
+      //
+      // A bootstrap that is still in flight counts as loaded: the viewport
+      // sync fires window 0 in the same tick the bootstrap starts, and without
+      // this both requests ran the whole-library scans, doubling the work
+      // behind every filter change.
+      const withAggregations =
+        !this.metadataLoaded && !inFlightControllers.has(BOOTSTRAP_KEY);
 
       try {
         const response = await romApi.getRoms({

@@ -153,7 +153,7 @@ describe("galleryRoms windowed fetch", () => {
     expect(store.metadataLoaded).toBe(true);
   });
 
-  it("requests every sidecar by default", async () => {
+  it("requests the painting sidecars by default, id index excluded", async () => {
     getRoms.mockResolvedValue({
       data: { total: 1, items: [], char_index: {}, rom_id_index: [] },
     });
@@ -164,8 +164,112 @@ describe("galleryRoms windowed fetch", () => {
     const params = getRoms.mock.calls[0][0];
     expect(params.withCharIndex).toBeUndefined();
     expect(params.withFilterValues).toBeUndefined();
-    expect(params.withRomIdIndex).toBeUndefined();
     expect(params.withTotal).toBeUndefined();
+    // The id index is the one full ordered scan, and nothing needs it to
+    // paint, so it is fetched behind the bootstrap instead.
+    expect(params.withRomIdIndex).toBe(false);
+  });
+
+  // The bootstrap used to block on the ordered id scan before the gallery
+  // could size itself, so every filter change waited out a full-result-set
+  // sort it did not need to render a single card.
+  it("paints from the count, then fills the id index in a follow-up", async () => {
+    const bootstrap = deferred();
+    const indexFetch = deferred();
+    getRoms.mockImplementationOnce(() => bootstrap.promise);
+    getRoms.mockImplementationOnce(() => indexFetch.promise);
+    const store = storeGalleryRoms();
+
+    const done = store.fetchInitialMetadata();
+    bootstrap.resolve({
+      data: { total: 500, items: [], char_index: { A: 0 }, rom_id_index: [] },
+    });
+    await done;
+
+    // Sized and painted off the COUNT alone, with no ids in hand yet.
+    expect(store.total).toBe(500);
+    expect(store.metadataLoaded).toBe(true);
+    expect(store.initialFetching).toBe(false);
+    expect(store.romIdIndex).toEqual([]);
+
+    // The follow-up asks for the id index and nothing else.
+    const followUp = getRoms.mock.calls[1][0];
+    expect(followUp.withRomIdIndex).toBe(true);
+    expect(followUp.withCharIndex).toBe(false);
+    expect(followUp.withFilterValues).toBe(false);
+    expect(followUp.withTotal).toBe(false);
+
+    indexFetch.resolve({
+      data: { total: null, items: [], char_index: {}, rom_id_index: [7, 8, 9] },
+    });
+    await flushPromises();
+
+    expect(store.romIdIndex).toEqual([7, 8, 9]);
+    // The follow-up's null total must not blank the established size.
+    expect(store.total).toBe(500);
+  });
+
+  it("skips the id-index follow-up when the caller opted out of it", async () => {
+    getRoms.mockResolvedValue({
+      data: { total: 4, items: [], char_index: {}, rom_id_index: [] },
+    });
+    const store = storeGalleryRoms();
+
+    await store.fetchInitialMetadata({
+      withCharIndex: false,
+      withFilterValues: false,
+      withRomIdIndex: false,
+    });
+    await flushPromises();
+
+    expect(getRoms).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fetch the id index when the bootstrap failed", async () => {
+    getRoms.mockRejectedValue(new Error("boom"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const store = storeGalleryRoms();
+
+    await store.fetchInitialMetadata();
+    await flushPromises();
+
+    expect(getRoms).toHaveBeenCalledTimes(1);
+    expect(store.metadataLoaded).toBe(false);
+  });
+
+  // The viewport sync fires window 0 in the same tick the bootstrap starts.
+  // Both used to request the sidecars, running every whole-library scan
+  // twice per filter change.
+  it("does not re-run the sidecars on window 0 while the bootstrap is in flight", async () => {
+    const bootstrap = deferred();
+    getRoms.mockImplementationOnce(() => bootstrap.promise);
+    getRoms.mockImplementation((params: { offset: number }) =>
+      Promise.resolve(windowResponse(params.offset, 500)),
+    );
+    const store = storeGalleryRoms();
+
+    // Bootstrap starts, then the viewport sync asks for window 0 before it
+    // has resolved.
+    const done = store.fetchInitialMetadata();
+    store.syncVisibleWindows([0]);
+
+    // Disambiguate from the bootstrap, which also sits at offset 0.
+    const windowCall = getRoms.mock.calls.find(
+      (c) => c[0].offset === 0 && c[0].limit !== 1,
+    );
+    expect(windowCall).toBeTruthy();
+    expect(windowCall?.[0].withCharIndex).toBe(false);
+    expect(windowCall?.[0].withFilterValues).toBe(false);
+    expect(windowCall?.[0].withRomIdIndex).toBe(false);
+
+    bootstrap.resolve({
+      data: { total: 500, items: [], char_index: { A: 0 }, rom_id_index: [] },
+    });
+    await done;
+    await flushPromises();
+
+    // The bootstrap's char index survives the window's empty one.
+    expect(store.charIndex).toEqual({ A: 0 });
   });
 
   it("does not clobber the filter drawer when filter values are skipped", async () => {
@@ -216,10 +320,13 @@ describe("galleryRoms windowed fetch", () => {
     store.syncVisibleWindows([0]);
     await flushPromises();
 
+    // Match on the window's page size: the bootstrap's id-index follow-up
+    // also runs with `withCharIndex: false`, at limit 1.
     const windowCall = getRoms.mock.calls.find(
-      (c) => c[0].withCharIndex === false,
+      (c) => c[0].limit !== 1 && c[0].offset === 0,
     );
     expect(windowCall).toBeTruthy();
+    expect(windowCall?.[0].withCharIndex).toBe(false);
     // The follow-up window also opts out of the full-library id-index scan
     // the bootstrap already paid for.
     expect(windowCall?.[0].withRomIdIndex).toBe(false);

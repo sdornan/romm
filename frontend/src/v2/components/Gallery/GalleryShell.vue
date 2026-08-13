@@ -38,6 +38,7 @@
 // header and its own resource-load flow. List rows own their per-row
 // fetch lifecycle internally (mount = entered overscan window).
 import { RDivider, RLetterHeading, RVirtualScroller } from "@v2/lib";
+import { debounce } from "lodash";
 import { storeToRefs } from "pinia";
 import {
   computed,
@@ -232,6 +233,20 @@ const filterActiveCount = computed(() => {
 // fires only on subsequent changes; the initial hydration done by
 // `useGalleryFilterUrl` happens before this watch is set up and so
 // does not echo here.
+//
+// Debounced on the same window as the search input and the URL sync:
+// ticking four genres in a row used to fire four full refetches, and
+// aborting the superseded ones only cancels the HTTP request, never the
+// whole-library scans the server has already started.
+const FILTER_REFETCH_DEBOUNCE_MS = 300;
+
+const refetchForFilters = debounce(() => {
+  galleryRoms.invalidateWindows();
+  void galleryRoms.fetchInitialMetadata();
+}, FILTER_REFETCH_DEBOUNCE_MS);
+
+onBeforeUnmount(() => refetchForFilters.cancel());
+
 watch(
   [
     filterMatched,
@@ -268,10 +283,7 @@ watch(
     tagsLogic,
     statusesLogic,
   ],
-  () => {
-    galleryRoms.invalidateWindows();
-    void galleryRoms.fetchInitialMetadata();
-  },
+  refetchForFilters,
   { deep: true },
 );
 
@@ -696,7 +708,7 @@ function setSearch(value: string) {
     // viewport-sync; list: GameListRow via its own onMounted).
     galleryRoms.invalidateWindows();
     void galleryRoms.fetchInitialMetadata();
-  }, 300);
+  }, FILTER_REFETCH_DEBOUNCE_MS);
 }
 
 // ── List-mode sort ────────────────────────────────────────────────
