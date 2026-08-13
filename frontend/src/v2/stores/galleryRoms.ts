@@ -588,10 +588,9 @@ export default defineStore("v2GalleryRoms", {
       // another name for a total the bootstrap already gave us, so opt out of
       // that too and keep the window fetch to just its page of covers.
       //
-      // A bootstrap that is still in flight counts as loaded: the viewport
-      // sync fires window 0 in the same tick the bootstrap starts, and without
-      // this both requests ran the whole-library scans, doubling the work
-      // behind every filter change.
+      // A bootstrap still in flight counts as loaded: the viewport sync fires
+      // window 0 in the same tick the bootstrap starts, and that bootstrap is
+      // already computing these for the same result set.
       const withAggregations =
         !this.metadataLoaded && !inFlightControllers.has(BOOTSTRAP_KEY);
 

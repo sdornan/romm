@@ -234,10 +234,9 @@ const filterActiveCount = computed(() => {
 // `useGalleryFilterUrl` happens before this watch is set up and so
 // does not echo here.
 //
-// Debounced on the same window as the search input and the URL sync:
-// ticking four genres in a row used to fire four full refetches, and
-// aborting the superseded ones only cancels the HTTP request, never the
-// whole-library scans the server has already started.
+// Debounced on the same window as the search input and the URL sync, so a
+// burst of toggles refetches once. Aborting a superseded request only cancels
+// the HTTP call, never the whole-library scans the server has already started.
 const FILTER_REFETCH_DEBOUNCE_MS = 300;
 
 const refetchForFilters = debounce(() => {
