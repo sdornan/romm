@@ -152,6 +152,67 @@ VERSION_TAG_REGEX = re.compile(r"^(?:version|ver|v)(?:[\s._-](.*)|([.\d].*))", r
 REGION_TAG_REGEX = re.compile(r"^reg[\s|-](.*)$", re.I)
 REVISION_TAG_REGEX = re.compile(r"^rev[\s|-](.*)$", re.I)
 
+# Tags that mark a dump as something other than a finished retail release. The
+# default version of a game should never be one of these while a real release
+# exists, so they sort last among siblings.
+PRERELEASE_TAG_KEYWORDS = (
+    "alpha",
+    "beta",
+    "debug",
+    "demo",
+    "kiosk",
+    "preview",
+    "proto",
+    "prototype",
+    "sample",
+    "trial",
+)
+
+# Matched as whole words so "(Beta 2)" and "(Kiosk Demo)" count while a tag that
+# merely contains one of them as a substring does not.
+_PRERELEASE_TAG_REGEX = re.compile(
+    r"\b(?:" + "|".join(PRERELEASE_TAG_KEYWORDS) + r")\b", re.I
+)
+
+# "1", "2.1" and "01_2" all read as major/minor; a lone letter is Sega-style
+# ("Rev A"). Anything else leaves the rank at 0.
+_REVISION_NUMERIC_REGEX = re.compile(r"^(\d+)(?:[._](\d+))?")
+_REVISION_LETTER_REGEX = re.compile(r"^([A-Za-z])$")
+
+# Matches the `roms.primary_region` column width.
+PRIMARY_REGION_MAX_LENGTH = 100
+
+REVISION_MINOR_MAX = 999
+# Keeps the scaled rank inside a 32-bit signed column. A date-style revision
+# clamps to it, so two of those rank equal rather than overflowing.
+REVISION_MAJOR_MAX = 2_000_000
+_REVISION_MAJOR_SCALE = REVISION_MINOR_MAX + 1
+
+
+def compute_revision_rank(revision: str | None) -> int:
+    """Rank a revision string so that a later revision ranks higher.
+
+    An unrevised dump ranks 0, so any revision outranks it. Letter revisions
+    share the numeric scale ("A" ranks with "1"), which only matters for a game
+    dumped under both spellings.
+    """
+    if not revision:
+        return 0
+
+    stripped = revision.strip()
+
+    numeric = _REVISION_NUMERIC_REGEX.match(stripped)
+    if numeric:
+        major = min(int(numeric[1]), REVISION_MAJOR_MAX)
+        minor = min(int(numeric[2] or 0), REVISION_MINOR_MAX)
+        return major * _REVISION_MAJOR_SCALE + minor
+
+    letter = _REVISION_LETTER_REGEX.match(stripped)
+    if letter:
+        return (ord(letter[1].upper()) - ord("A") + 1) * _REVISION_MAJOR_SCALE
+
+    return 0
+
 
 @dataclass(frozen=True)
 class ParsedTags:
@@ -160,6 +221,41 @@ class ParsedTags:
     regions: list[str]
     languages: list[str]
     other_tags: list[str]
+
+    @property
+    def primary_region(self) -> str | None:
+        """The region a multi-region dump is ranked by, canonically spelled.
+
+        Truncated to the column width because an explicit "Reg-" tag keeps
+        whatever the filename said, which no priority entry matches anyway.
+        """
+        return self.regions[0][:PRIMARY_REGION_MAX_LENGTH] if self.regions else None
+
+    @property
+    def is_prerelease(self) -> bool:
+        return any(_PRERELEASE_TAG_REGEX.search(tag) for tag in self.other_tags)
+
+    @property
+    def revision_rank(self) -> int:
+        return compute_revision_rank(self.revision)
+
+    @property
+    def rom_columns(self) -> dict[str, Any]:
+        """Every `roms` column derived from the filename tags.
+
+        Written as one mapping so the scan, reassociation, reparse and rename
+        paths cannot drift from each other as derived columns are added.
+        """
+        return {
+            "regions": self.regions,
+            "languages": self.languages,
+            "tags": self.other_tags,
+            "revision": self.revision,
+            "version": self.version,
+            "primary_region": self.primary_region,
+            "is_prerelease": self.is_prerelease,
+            "revision_rank": self.revision_rank,
+        }
 
 
 @dataclass(frozen=True)

@@ -15,7 +15,9 @@ was paid four times over. 0107 widened the index to close the gap.
 
 The failure mode is silent, and adding a metadata provider is the way back into
 it: a new id column joins the window's COALESCE chain, the index does not follow
-it, and the gallery quietly returns to full scans.
+it, and the gallery quietly returns to full scans. A new sort input does the
+same, which is why 0108 added its ranking columns to the index rather than
+reading the JSON region and tag columns they mirror.
 """
 
 from sqlalchemy import inspect
@@ -38,6 +40,9 @@ INDEX_COLUMNS = [
     "flashpoint_id",
     "fs_name_no_ext",
     "id",
+    "is_prerelease",
+    "primary_region",
+    "revision_rank",
 ]
 
 

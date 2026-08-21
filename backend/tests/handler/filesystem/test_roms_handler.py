@@ -16,8 +16,10 @@ from handler.filesystem.base_handler import (
     REGIONS_BY_SHORTCODE,
 )
 from handler.filesystem.roms_handler import (
+    PRIMARY_REGION_MAX_LENGTH,
     FileHash,
     FSRomsHandler,
+    compute_revision_rank,
 )
 from models.platform import Platform
 from models.rom import Rom, RomFile, RomFileCategory
@@ -331,6 +333,86 @@ class TestFSRomsHandler:
 
         assert handler.parse_tags("Game (japanese).rom").languages == ["Japanese"]
         assert handler.parse_tags("Game (no language).rom").languages == ["No Language"]
+
+    def test_parsed_tags_primary_region(self, handler: FSRomsHandler):
+        """The region a multi-region dump is ranked by is its first tag."""
+        assert handler.parse_tags("Game (USA).rom").primary_region == "USA"
+        assert handler.parse_tags("Game (Japan, USA).rom").primary_region == "Japan"
+        assert handler.parse_tags("Game.rom").primary_region is None
+
+        # An explicit "Reg-" keeps an unknown code, so the value is bounded to
+        # the column width rather than the filename's.
+        long_region = "x" * (PRIMARY_REGION_MAX_LENGTH + 50)
+        parsed = handler.parse_tags(f"Game (Reg-{long_region}).rom")
+        assert parsed.primary_region is not None
+        assert len(parsed.primary_region) == PRIMARY_REGION_MAX_LENGTH
+
+    def test_parsed_tags_is_prerelease(self, handler: FSRomsHandler):
+        for fs_name in (
+            "Game (USA) (Demo).rom",
+            "Game (USA) (Kiosk Demo).rom",
+            "Game (USA) (Beta 2).rom",
+            "Game (USA) (Proto).rom",
+            "Game (USA) (Prototype).rom",
+            "Game (USA) (Sample).rom",
+            "Game (USA) (demo).rom",
+        ):
+            assert handler.parse_tags(fs_name).is_prerelease, fs_name
+
+        for fs_name in (
+            "Game (USA).rom",
+            "Game (USA) (Rev 1).rom",
+            "Game (USA) (Alt).rom",
+            "Game (USA) (Unl).rom",
+            # A keyword has to stand as its own word to count.
+            "Game (USA) (Democracy).rom",
+        ):
+            assert not handler.parse_tags(fs_name).is_prerelease, fs_name
+
+    def test_parsed_tags_revision_rank(self, handler: FSRomsHandler):
+        """A later revision ranks higher; an unrevised dump ranks 0."""
+        assert handler.parse_tags("Game (USA).rom").revision_rank == 0
+
+        ranks = [
+            handler.parse_tags(f"Game (USA) (Rev {revision}).rom").revision_rank
+            for revision in ("1", "2", "10")
+        ]
+        assert ranks == sorted(ranks)
+        assert ranks[0] > 0
+
+        # Sega-style letter revisions order among themselves.
+        assert (
+            handler.parse_tags("Game (USA) (Rev A).rom").revision_rank
+            < handler.parse_tags("Game (USA) (Rev B).rom").revision_rank
+        )
+
+        # A minor part refines its major, without overtaking the next one.
+        rev_1 = handler.parse_tags("Game (USA) (Rev 1).rom").revision_rank
+        rev_1_1 = handler.parse_tags("Game (USA) (Rev 1.1).rom").revision_rank
+        rev_2 = handler.parse_tags("Game (USA) (Rev 2).rom").revision_rank
+        assert rev_1 < rev_1_1 < rev_2
+
+    def test_compute_revision_rank_tolerates_junk(self):
+        """An unparseable revision ranks with the unrevised rather than raising."""
+        for revision in (None, "", "   ", "final", "??", "AB"):
+            assert compute_revision_rank(revision) == 0
+
+    def test_parsed_tags_rom_columns_cover_every_derived_column(
+        self, handler: FSRomsHandler
+    ):
+        """The mapping the write paths use carries all of the tag columns."""
+        parsed = handler.parse_tags("Game (USA) (Demo) (Rev 1) (v1.2).rom")
+
+        assert parsed.rom_columns == {
+            "regions": ["USA"],
+            "languages": [],
+            "tags": ["Demo"],
+            "revision": "1",
+            "version": "1.2",
+            "primary_region": "USA",
+            "is_prerelease": True,
+            "revision_rank": parsed.revision_rank,
+        }
 
     def test_parse_tags_language_codes_are_case_insensitive(
         self, handler: FSRomsHandler

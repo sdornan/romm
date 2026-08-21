@@ -385,6 +385,9 @@ class Rom(BaseModel):
             "flashpoint_id",
             "fs_name_no_ext",
             "id",
+            "is_prerelease",
+            "primary_region",
+            "revision_rank",
         ),
         Index("idx_roms_platform_fs_size", "platform_id", "fs_size_bytes"),
         Index("idx_roms_missing_from_fs", "missing_from_fs", "name_sort_key"),
@@ -487,6 +490,13 @@ class Rom(BaseModel):
     regions: Mapped[list[str] | None] = mapped_column(CustomJSON(), default=[])
     languages: Mapped[list[str] | None] = mapped_column(CustomJSON(), default=[])
     tags: Mapped[list[str] | None] = mapped_column(CustomJSON(), default=[])
+
+    # Scalar mirrors of the tag columns above, so the grouped-gallery dedup
+    # window can rank siblings inside its covering index instead of parsing
+    # JSON off the wide row. Derived by `ParsedTags.rom_columns`.
+    primary_region: Mapped[str | None] = mapped_column(String(length=100), default=None)
+    is_prerelease: Mapped[bool] = mapped_column(default=False, nullable=False)
+    revision_rank: Mapped[int] = mapped_column(Integer(), default=0, nullable=False)
 
     crc_hash: Mapped[str | None] = mapped_column(String(length=100))
     md5_hash: Mapped[str | None] = mapped_column(String(length=100))

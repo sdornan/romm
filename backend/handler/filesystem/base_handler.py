@@ -150,6 +150,28 @@ def region_name_to_provider_shortcode(region_name: str | None) -> str | None:
     return _REGION_NAME_TO_PROVIDER_SHORTCODE_CI.get(region_name.lower())
 
 
+# Reverse of REGION_NAME_TO_PROVIDER_SHORTCODE. A shortcode can stand for more
+# than one region name ("nl" is both Holland and Netherlands).
+_REGION_NAMES_BY_PROVIDER_SHORTCODE: dict[str, tuple[str, ...]] = {
+    code: tuple(
+        name
+        for name, name_code in REGION_NAME_TO_PROVIDER_SHORTCODE.items()
+        if name_code == code
+    )
+    for code in set(REGION_NAME_TO_PROVIDER_SHORTCODE.values())
+}
+
+
+def region_names_for_provider_shortcode(code: str) -> tuple[str, ...]:
+    """Canonical region names a provider shortcode stands for.
+
+    Lets a region priority written in provider shortcodes be matched against the
+    region names stored on a rom. ScreenScraper's pseudo-regions ("ss", "cus",
+    "unk") name no real region, so they resolve to nothing.
+    """
+    return _REGION_NAMES_BY_PROVIDER_SHORTCODE.get(code.strip().lower(), ())
+
+
 LANGUAGES_BY_SHORTCODE = {lang[0]: lang[1] for lang in LANGUAGES}
 
 # Every accepted language spelling, lowercased, mapped to its canonical name.

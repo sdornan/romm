@@ -44,6 +44,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import Select
 
 from config import ROMM_DB_DRIVER
+from config.config_manager import config_manager as cm
 from decorators.database import begin_session
 from handler.metadata.base_handler import UniversalPlatformSlug as UPS
 from handler.redis_handler import sync_cache
@@ -323,6 +324,30 @@ def _create_metadata_id_case(
         ),
         else_=None,
     )
+
+
+def _region_priority_case(region_column: ColumnElement) -> ColumnElement:
+    """Rank a rom's primary region against the configured region priority.
+
+    Reuses `scan.priority.region`, so the region order already set for metadata
+    also decides which version of a game the gallery shows. The ranking is built
+    per query rather than stored, so editing the setting takes effect at once.
+    Regions outside the list, and roms with no region tag, rank last.
+    """
+    # Imported here because handler.filesystem imports handler.metadata, which
+    # imports handler.filesystem back.
+    from handler.filesystem.base_handler import region_names_for_provider_shortcode
+
+    ranked: list[tuple[ColumnElement, int]] = []
+    for code in dict.fromkeys(cm.get_config().SCAN_REGION_PRIORITY):
+        names = region_names_for_provider_shortcode(code)
+        if names:
+            ranked.append((region_column.in_(names), len(ranked)))
+
+    if not ranked:
+        return literal(0)
+
+    return case(*ranked, else_=len(ranked))
 
 
 def with_details(func):
@@ -1292,6 +1317,9 @@ class DBRomsHandler(DBBaseHandler):
                     Rom.launchbox_id,
                     Rom.tgdb_id,
                     Rom.flashpoint_id,
+                    Rom.is_prerelease,
+                    Rom.primary_region,
+                    Rom.revision_rank,
                 )
                 .subquery()
             )
@@ -1358,8 +1386,14 @@ class DBRomsHandler(DBBaseHandler):
                                 base_subquery.c.platform_id,
                             ),
                         ),
+                        # A user's explicit pick wins; then a real release
+                        # over a demo or prototype, the most preferred region,
+                        # its latest revision, and the filename to stay stable.
                         order_by=[
                             is_main_sibling_order,
+                            base_subquery.c.is_prerelease.asc(),
+                            _region_priority_case(base_subquery.c.primary_region),
+                            base_subquery.c.revision_rank.desc(),
                             base_subquery.c.fs_name_no_ext.asc(),
                         ],
                     )

@@ -403,11 +403,7 @@ async def _identify_rom(
     rom_attrs = {
         "fs_name": fs_rom["fs_name"],
         "fs_path": roms_path,
-        "regions": parsed_tags.regions,
-        "revision": parsed_tags.revision,
-        "version": parsed_tags.version,
-        "languages": parsed_tags.languages,
-        "tags": parsed_tags.other_tags,
+        **parsed_tags.rom_columns,
         "platform_id": platform.id,
         "name": fs_rom_handler.get_file_name_with_no_tags(fs_rom["fs_name"]),
         "url_cover": "",
@@ -457,11 +453,7 @@ async def _identify_rom(
                 {
                     "fs_name": fs_rom["fs_name"],
                     "fs_path": roms_path,
-                    "regions": parsed_tags.regions,
-                    "revision": parsed_tags.revision,
-                    "version": parsed_tags.version,
-                    "languages": parsed_tags.languages,
-                    "tags": parsed_tags.other_tags,
+                    **parsed_tags.rom_columns,
                     "missing_from_fs": False,
                 },
             )
@@ -486,11 +478,8 @@ async def _identify_rom(
     # forward from the rom it is handed, and merging its result is what persists
     # them.
     if not newly_added and _should_reparse_tags(scan_type, rom, roms_ids):
-        rom.regions = parsed_tags.regions
-        rom.languages = parsed_tags.languages
-        rom.tags = parsed_tags.other_tags
-        rom.revision = parsed_tags.revision
-        rom.version = parsed_tags.version
+        for column, value in parsed_tags.rom_columns.items():
+            setattr(rom, column, value)
 
     # Build rom files object before scanning. A reassociated ROM always rebuilds
     # its files so the stale paths from the old filename are replaced.
