@@ -1,0 +1,42 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":dependencyDashboard"],
+  "enabledManagers": ["github-actions", "docker-compose", "custom.regex"],
+  "prConcurrentLimit": 5,
+  "packageRules": [
+    {
+      "description": "RomM's own image in the user-facing example is deliberately latest",
+      "matchPackageNames": ["rommapp/romm"],
+      "enabled": false
+    },
+    {
+      "description": "Move every MariaDB pin in one PR so the workflows and compose files cannot drift apart",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["mariadb"],
+      "groupName": "mariadb"
+    },
+    {
+      "description": "A major database upgrade rewrites the on-disk format and has no in-place downgrade",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["mariadb", "postgres"],
+      "matchUpdateTypes": ["major"],
+      "addLabels": ["needs-migration-review"]
+    },
+    {
+      "description": "One PR for the pinned action SHAs rather than one apiece",
+      "matchManagers": ["github-actions"],
+      "matchDepTypes": ["action"],
+      "groupName": "github actions"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Matrix legs in migrations.yml build their tag at runtime, so Renovate cannot see them as image references",
+      "managerFilePatterns": ["/^\\.github/workflows/migrations\\.yml$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+?) depName=(?<depName>[^\\s]+?)\\s+- version: \"(?<currentValue>[^\"]+?)\""
+      ]
+    }
+  ]
+}

@@ -77,12 +77,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # renovate: datasource=docker depName=mariadb
           - version: "12.3.3"
             charset: utf8mb4
             collation: utf8mb4_general_ci
+          # renovate: datasource=docker depName=mariadb
           - version: "12.3.3"
             charset: utf8mb3
             collation: utf8mb3_unicode_ci
+          # Floor pin, deliberately left unmarked so Renovate does not raise it.
           - version: "10.11.19"
             charset: utf8mb4
             collation: utf8mb4_general_ci
