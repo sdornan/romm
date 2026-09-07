@@ -419,8 +419,8 @@ HTTP Request
 | PostgreSQL    | `postgresql+psycopg`       | Supported |
 
 MariaDB 10.6 is the floor because the `virtual_collections` view uses
-`JSON_TABLE`. CI covers the 10.11 and 11.8 LTS lines; 11.8 is what the bundled
-`docker-compose.yml` runs.
+`JSON_TABLE`. CI covers the 10.11 and 12.3 LTS lines; 12.3 is what the bundled
+`docker-compose.yml` runs, and what the `latest` tag currently resolves to.
 
 ### Engine & Session Setup
 

@@ -35,10 +35,7 @@ services:
         restart: true
 
   romm-db:
-    # Was `mariadb:latest`, which now resolves to 12.x. Existing installs on
-    # latest must dump and restore to move here: MariaDB has no in-place
-    # downgrade across major versions.
-    image: mariadb:11.8
+    image: mariadb:12.3
     container_name: romm-db
     restart: unless-stopped
     environment:
