@@ -66,7 +66,9 @@ jobs:
     # A server configured for utf8mb3 makes the roms table, the view literals
     # and the JSON_TABLE columns utf8mb3, which breaks collation-sensitive
     # migration SQL that a default utf8mb4 server accepts (issue #4350).
-    name: migrate-mariadb (${{ matrix.collation }})
+    # 10.11 is the oldest supported LTS, and pins the utf8mb4 default that
+    # predates the uca1400 switch in 11.6 (issue #3758).
+    name: migrate-mariadb (${{ matrix.version }}, ${{ matrix.collation }})
     runs-on: ubuntu-latest
     permissions:
       checks: write
@@ -75,10 +77,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - charset: utf8mb4
+          - version: "11.8.9"
+            charset: utf8mb4
             collation: utf8mb4_general_ci
-          - charset: utf8mb3
+          - version: "11.8.9"
+            charset: utf8mb3
             collation: utf8mb3_unicode_ci
+          - version: "10.11.19"
+            charset: utf8mb4
+            collation: utf8mb4_general_ci
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -101,6 +108,7 @@ jobs:
         env:
           CHARSET: ${{ matrix.charset }}
           COLLATION: ${{ matrix.collation }}
+          VERSION: ${{ matrix.version }}
         run: |
           docker run -d --name mariadb -p 3306:3306 \
             -e MARIADB_USER=user \
@@ -111,7 +119,7 @@ jobs:
             --health-interval 5s \
             --health-timeout 2s \
             --health-retries 10 \
-            mariadb:11.3.2 \
+            "mariadb:$VERSION" \
             --character-set-server="$CHARSET" \
             --collation-server="$COLLATION"
           for _ in $(seq 1 30); do

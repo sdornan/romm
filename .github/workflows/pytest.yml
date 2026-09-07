@@ -32,7 +32,7 @@ jobs:
         db: [mariadb, postgresql]
     services:
       mariadb:
-        image: mariadb:11.3.2
+        image: mariadb:11.8.9
         ports:
           - 3306
         env:

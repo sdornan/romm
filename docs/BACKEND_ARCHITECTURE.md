@@ -412,11 +412,15 @@ HTTP Request
 
 ### Supported Databases
 
-| Database      | Driver                | Status    |
-| ------------- | --------------------- | --------- |
-| MariaDB 10.5+ | `mariadb+pymysql`     | Default   |
-| MySQL 8.0+    | `mysql+pymysql`       | Supported |
-| PostgreSQL    | `postgresql+psycopg2` | Supported |
+| Database      | Driver                     | Status    |
+| ------------- | -------------------------- | --------- |
+| MariaDB 10.6+ | `mariadb+mariadbconnector` | Default   |
+| MySQL 8.0+    | `mysql+mysqlconnector`     | Supported |
+| PostgreSQL    | `postgresql+psycopg`       | Supported |
+
+MariaDB 10.6 is the floor because the `virtual_collections` view uses
+`JSON_TABLE`. CI covers the 10.11 and 11.8 LTS lines; 11.8 is what the bundled
+`docker-compose.yml` runs.
 
 ### Engine & Session Setup
 

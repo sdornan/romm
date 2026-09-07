@@ -3,7 +3,7 @@
 #        uv run pytest
 services:
   mariadb:
-    image: mariadb:10.11
+    image: mariadb:11.8.9
     ports:
       - "3306:3306"
     environment:
