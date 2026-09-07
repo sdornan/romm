@@ -115,8 +115,31 @@ wait_for_gunicorn() {
 	warn_log "Gunicorn did not become ready after waiting ${wait_seconds}s!"
 }
 
+# Turns WEB_SERVER_CONCURRENCY=auto into a worker count sized to the CPU and
+# memory the container is allowed to use. Any explicit value is left alone.
+resolve_web_concurrency() {
+	local requested="${WEB_SERVER_CONCURRENCY:-1}"
+	if [[ ${requested,,} != "auto" ]]; then
+		return 0
+	fi
+
+	local suggested
+	suggested=$(PYTHONPATH="/backend:${PYTHONPATH-}" python3 -m utils.hardware 2>/dev/null) || true
+
+	if [[ ${suggested} =~ ^[1-9][0-9]*$ ]]; then
+		WEB_SERVER_CONCURRENCY="${suggested}"
+		info_log "Sized the web server to ${WEB_SERVER_CONCURRENCY} worker(s) from the available CPU and memory"
+	else
+		WEB_SERVER_CONCURRENCY=1
+		warn_log "Could not size the web server from this host's hardware, falling back to ${WEB_SERVER_CONCURRENCY} worker"
+	fi
+	export WEB_SERVER_CONCURRENCY
+}
+
 # Runs our main process and creates a corresponding PID file
 start_bin_gunicorn() {
+	resolve_web_concurrency
+
 	# Wire LOGLEVEL into Gunicorn's logging config so it respects the env var.
 	local gunicorn_level="${LOGLEVEL^^}"
 	local gunicorn_log_config="/tmp/gunicorn/logging.conf"

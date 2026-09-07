@@ -1543,6 +1543,34 @@ Falls back to `FakeRedis` in test mode.
 | `DEV_MODE`       | `false`          | Development mode     |
 | `LOGLEVEL`       | `INFO`           | Log level            |
 
+#### Web Server
+
+Gunicorn settings, applied by `docker/init_scripts/init`.
+
+| Variable                        | Default | Description                             |
+| ------------------------------- | ------- | --------------------------------------- |
+| `WEB_SERVER_CONCURRENCY`        | `1`     | Worker processes, or `auto` (see below) |
+| `WEB_SERVER_TIMEOUT`            | `300`   | Request timeout (seconds)               |
+| `WEB_SERVER_KEEPALIVE`          | `2`     | Keep-Alive wait (seconds)               |
+| `WEB_SERVER_MAX_REQUESTS`       | `1000`  | Requests before a worker restarts       |
+| `WEB_SERVER_WORKER_CONNECTIONS` | `1000`  | Simultaneous clients per worker         |
+
+`WEB_SERVER_CONCURRENCY=auto` sizes the pool at startup from what the container
+may actually use, via `backend/utils/hardware.py`:
+
+- **CPU**: `2 × cores + 1`, where cores is the lowest of the process CPU
+  affinity and the cgroup v2 (`cpu.max`) or v1 (`cpu.cfs_quota_us`) quota. Host
+  core counts are deliberately not used, since `--cpus` and `--cpuset-cpus` can
+  put the allowance well below them.
+- **Memory**: capped so the workers fit in the detected memory budget (the lower
+  of the cgroup limit and `MemTotal`) minus a reserve for valkey, nginx, the RQ
+  workers and the watchers.
+- **Hard ceiling** of 8, because each worker's connection pool holds up to 15
+  connections against a stock MariaDB `max_connections` of 151.
+
+Multiple workers need the Socket.IO clients to hold a WebSocket, as the
+long-polling fallback has no sticky routing behind the single Gunicorn upstream.
+
 #### Database
 
 | Variable         | Default   | Description                         |
