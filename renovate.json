@@ -2,18 +2,24 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended", ":dependencyDashboard"],
   "enabledManagers": ["github-actions", "docker-compose", "custom.regex"],
+  "ignorePaths": ["examples/**"],
   "prConcurrentLimit": 5,
   "packageRules": [
     {
-      "description": "RomM's own image in the user-facing example is deliberately latest",
-      "matchPackageNames": ["rommapp/romm"],
-      "enabled": false
-    },
-    {
-      "description": "Move every MariaDB pin in one PR so the workflows and compose files cannot drift apart",
+      "description": "Keep each service's pins moving together so CI, dev and the test stack cannot drift apart",
       "matchDatasources": ["docker"],
       "matchPackageNames": ["mariadb"],
       "groupName": "mariadb"
+    },
+    {
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["postgres"],
+      "groupName": "postgres"
+    },
+    {
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["valkey/valkey"],
+      "groupName": "valkey"
     },
     {
       "description": "A major database upgrade rewrites the on-disk format and has no in-place downgrade",
