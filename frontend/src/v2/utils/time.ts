@@ -42,3 +42,31 @@ export function releaseYear(
 ): number | null {
   return toReleaseDate(timestamp)?.getUTCFullYear() ?? null;
 }
+
+// HowLongToBeat times are stored in seconds; the gallery's length column and
+// the length filter both talk in hours.
+const SECONDS_PER_HOUR = 3600;
+
+const intlHours = new Intl.NumberFormat("en-US", {
+  maximumSignificantDigits: 3,
+});
+
+/** A HowLongToBeat duration as hours rounded to the nearest half ("12.5h"),
+ * or minutes when the game is shorter than an hour. Null when unset. */
+export function formatPlaytime(
+  seconds: number | null | undefined,
+): string | null {
+  if (!seconds || seconds <= 0) return null;
+  const hours = seconds / SECONDS_PER_HOUR;
+  if (hours < 1) {
+    const minutes = Math.round(seconds / 60);
+    return minutes > 0 ? `${minutes}m` : null;
+  }
+  return `${intlHours.format(Math.round(hours * 2) / 2)}h`;
+}
+
+/** A length-filter bound entered in hours, as the seconds the API takes. */
+export function playtimeHoursToSeconds(hours: number | null): number | null {
+  if (hours == null || !Number.isFinite(hours) || hours < 0) return null;
+  return Math.round(hours * SECONDS_PER_HOUR);
+}

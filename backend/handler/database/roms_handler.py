@@ -174,6 +174,7 @@ ROM_METADATA_ORDER_COLUMNS: dict[str, QueryableAttribute] = {
     "first_release_date": Rom.generated_first_release_date,
     "average_rating": Rom.generated_average_rating,
     "player_count": Rom.generated_player_count,
+    "hltb_main_story": Rom.generated_hltb_main_story,
 }
 
 # Filter dropdowns read the narrow `roms_facets` mirror instead of `roms`,
@@ -1234,6 +1235,8 @@ class DBRomsHandler(DBBaseHandler):
         player_counts: Sequence[str] | None = None,
         metadata_providers: Sequence[str] | None = None,
         tags: Sequence[str] | None = None,
+        hltb_main_story_min: int | None = None,
+        hltb_main_story_max: int | None = None,
         # Logic operators for multi-value filters
         genres_logic: str = "any",
         franchises_logic: str = "any",
@@ -1378,6 +1381,14 @@ class DBRomsHandler(DBBaseHandler):
 
         if updated_after:
             query = query.filter(Rom.updated_at > updated_after)
+
+        # A NULL length is excluded by either comparison, so a range filter
+        # only ever returns roms HowLongToBeat actually has a time for.
+        if hltb_main_story_min is not None:
+            query = query.filter(Rom.generated_hltb_main_story >= hltb_main_story_min)
+
+        if hltb_main_story_max is not None:
+            query = query.filter(Rom.generated_hltb_main_story <= hltb_main_story_max)
 
         # Apply metadata and rom-level filters efficiently
         # Moved before applying group_by_meta_id to avoid missing titles when
@@ -1679,6 +1690,8 @@ class DBRomsHandler(DBBaseHandler):
             player_counts=kwargs.get("player_counts", None),
             metadata_providers=kwargs.get("metadata_providers", None),
             tags=kwargs.get("tags", None),
+            hltb_main_story_min=kwargs.get("hltb_main_story_min", None),
+            hltb_main_story_max=kwargs.get("hltb_main_story_max", None),
             # Logic operators for multi-value filters
             genres_logic=kwargs.get("genres_logic", "any"),
             franchises_logic=kwargs.get("franchises_logic", "any"),
