@@ -19,6 +19,7 @@ import VersionSwitcher from "@/components/GameDetails/VersionSwitcher.vue";
 import PlatformIcon from "@/components/shared/PlatformIcon.vue";
 import { useBreakpoint } from "@/composables/useBreakpoint";
 import { useGameActions } from "@/composables/useGameActions";
+import { useCollapsingTitle } from "@/composables/useNavTitle";
 import { useUISettings } from "@/composables/useUISettings";
 import { RIcon, RTag, RTooltip } from "@/lib";
 import type { DetailedRom } from "@/stores/roms";
@@ -41,6 +42,9 @@ const props = defineProps<{
   languages: string[];
   tags: string[];
 }>();
+
+const headingEl = ref<HTMLElement | null>(null);
+useCollapsingTitle(headingEl, () => props.title);
 
 const actions = useGameActions(() => props.rom);
 const { showLogoTitle } = useUISettings();
@@ -93,6 +97,7 @@ function onLogoLoad(event: Event) {
   <div class="r-det-header">
     <div class="r-det-header__title-row">
       <h1
+        ref="headingEl"
         class="r-det-header__title"
         :class="{ 'r-det-header__title--logo': logoUrl }"
       >

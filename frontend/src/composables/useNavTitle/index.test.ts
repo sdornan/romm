@@ -6,7 +6,10 @@ import { useCollapsingTitle, useNavTitle } from "./index";
 const { notify } = vi.hoisted(() => ({
   notify: { current: (_entries: Partial<IntersectionObserverEntry>[]) => {} },
 }));
+const windowScroll = ref(0);
+
 vi.mock("@vueuse/core", () => ({
+  useWindowScroll: () => ({ y: windowScroll }),
   useElementSize: () => ({ height: ref(58) }),
   useIntersectionObserver: (
     _target: unknown,
@@ -16,11 +19,11 @@ vi.mock("@vueuse/core", () => ({
   },
 }));
 
-function setup(title = ref("Search")) {
+function setup(title = ref("Search"), home = false) {
   const wrapper = mount(
     defineComponent({
       setup() {
-        useCollapsingTitle(ref(null), title);
+        useCollapsingTitle(home ? null : ref(null), title);
         return () => h("h1", title.value);
       },
     }),
@@ -39,6 +42,18 @@ async function observe(bottom: number, isIntersecting = false) {
 }
 
 describe("collapsing navigation title", () => {
+  it("shows Home after document scrolling and hides it at the top", async () => {
+    const { wrapper } = setup(ref("Home"), true);
+    expect(useNavTitle().collapsedTitle.value).toBe("");
+    windowScroll.value = 100;
+    await nextTick();
+    expect(useNavTitle().collapsedTitle.value).toBe("Home");
+    windowScroll.value = 0;
+    await nextTick();
+    expect(useNavTitle().collapsedTitle.value).toBe("");
+    wrapper.unmount();
+  });
+
   it("appears only after the heading passes above the navigation bar", async () => {
     const { wrapper } = setup();
     const { collapsedTitle } = useNavTitle();

@@ -1,4 +1,8 @@
-import { useElementSize, useIntersectionObserver } from "@vueuse/core";
+import {
+  useElementSize,
+  useIntersectionObserver,
+  useWindowScroll,
+} from "@vueuse/core";
 import {
   computed,
   onScopeDispose,
@@ -9,6 +13,7 @@ import {
   type MaybeRefOrGetter,
   type Ref,
 } from "vue";
+import { useNavGlass } from "@/composables/useNavGlass";
 
 const navEl = shallowRef<HTMLElement | null>(null);
 const collapsedTitle = ref("");
@@ -19,7 +24,7 @@ export function useNavTitle() {
 }
 
 export function useCollapsingTitle(
-  heading: Ref<HTMLElement | null>,
+  heading: Ref<HTMLElement | null> | null,
   title: MaybeRefOrGetter<string | undefined>,
 ) {
   const id = Symbol();
@@ -27,11 +32,22 @@ export function useCollapsingTitle(
   collapsedTitle.value = "";
   const { height } = useElementSize(navEl, undefined, { box: "border-box" });
   const hiddenAbove = ref(false);
+  if (!heading) {
+    const { y } = useWindowScroll();
+    const { threshold } = useNavGlass();
+    watch(
+      y,
+      (value) => {
+        hiddenAbove.value = value > threshold;
+      },
+      { immediate: true },
+    );
+  }
   const rootMargin = computed(() => `-${height.value}px 0px 0px 0px`);
   useIntersectionObserver(
     heading,
     ([entry]) => {
-      if (entry)
+      if (heading && entry)
         hiddenAbove.value =
           !entry.isIntersecting &&
           entry.boundingClientRect.bottom <= height.value;

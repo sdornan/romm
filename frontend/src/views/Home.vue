@@ -23,6 +23,7 @@ import CardRow from "@/components/shared/CardRow.vue";
 import RecommendationReason from "@/components/shared/RecommendationReason.vue";
 import { useGridNav } from "@/composables/useGridNav";
 import { useLoadingPhase } from "@/composables/useLoadingPhase";
+import { useCollapsingTitle } from "@/composables/useNavTitle";
 import { useUISettings } from "@/composables/useUISettings";
 import { useVisiblePoll } from "@/composables/useVisiblePoll";
 import { useWebpSupport } from "@/composables/useWebpSupport";
@@ -41,6 +42,7 @@ import { useStreamingStore } from "@/stores/streaming";
 import { collectionCoverList } from "@/utils/collectionCovers";
 
 const { t } = useI18n();
+useCollapsingTitle(null, () => t("common.home"));
 
 const romsStore = storeRoms();
 const platformsStore = storePlatforms();
